@@ -27,7 +27,10 @@ class AgentConfig:
     memory_enabled: bool = False
 
 class BaseAgent(ABC):
-    """Base class for all agents"""
+    """Base class for all agents with registry support"""
+    
+    # Registry metadata - override in subclasses
+    __agent_name__ = 'base_agent'
     
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -97,6 +100,41 @@ class BaseAgent(ABC):
     def get_tools(self) -> List[BaseTool]:
         """Get all enabled tools"""
         return [tool for tool in self.tools if tool.enabled]
+    
+    def get_info(self) -> Dict[str, Any]:
+        """Get detailed agent information"""
+        return {
+            'name': self.config.name,
+            'description': self.config.description,
+            'agent_type': self.__agent_name__,
+            'tools_count': len(self.tools),
+            'tools_enabled': len([tool for tool in self.tools if tool.enabled]),
+            'iterations': self._iteration_count,
+            'registry_name': getattr(self.__class__, '_registry_name', self.__agent_name__)
+        }
+    
+    @classmethod
+    def from_registry(cls, agent_name: str, **kwargs):
+        """Create agent from registry"""
+        from . import AGENT_REGISTRY
+        
+        if agent_name not in AGENT_REGISTRY:
+            raise ValueError(f"Agent '{agent_name}' not found in registry")
+        
+        agent_class = AGENT_REGISTRY[agent_name]
+        return agent_class(**kwargs)
+    
+    @property
+    def execution_stats(self) -> Dict[str, Any]:
+        """Get agent execution statistics"""
+        return {
+            'name': self.config.name,
+            'agent_type': self.__agent_name__,
+            'total_iterations': self._iteration_count,
+            'tools_count': len(self.tools),
+            'tools_enabled': len([tool for tool in self.tools if tool.enabled]),
+            'llm_configured': self.llm is not None
+        }
 
 class AgentRegistry:
     """Registry for dynamic agent registration"""

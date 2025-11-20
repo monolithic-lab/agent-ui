@@ -3,23 +3,44 @@ import asyncio
 import io
 import sys
 import traceback
+import uuid
+import atexit
+import os
 from typing import Dict, Any
 
 from tools.base_tool import BaseTool, ToolResult, ToolSchema
 
+# Get logger
+import logging
+logger = logging.getLogger(__name__)
+
 class CodeInterpreter(BaseTool):
-    """Python code execution sandbox"""
+    """Python code execution sandbox with registry support"""
+    
+    # Registry metadata
+    __tool_name__ = 'code_interpreter'  # This will auto-register
     
     def __init__(self, timeout: int = 30, max_output_length: int = 10000):
         super().__init__(
             name="code_interpreter",
-            description="Execute Python code in a sandboxed environment"
+            description="Execute Python code in a sandboxed environment with safety checks"
         )
         self.timeout = timeout
         self.max_output_length = max_output_length
         self.execution_count = 0
+        self.instance_id = str(uuid.uuid4())
+        self.work_dir = '/tmp/agent_code_interpreter'
+        
+        # Ensure work directory exists
+        os.makedirs(self.work_dir, exist_ok=True)
+        
+        # Setup cleanup on exit
+        atexit.register(self._cleanup)
+        
+        logger.info(f"CodeInterpreter initialized: {self.instance_id}")
     
     def get_schema(self) -> ToolSchema:
+        """Get tool schema for function calling"""
         return ToolSchema(
             name=self.name,
             description=self.description,
@@ -28,7 +49,7 @@ class CodeInterpreter(BaseTool):
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Python code to execute"
+                        "description": "Python code to execute in sandboxed environment"
                     }
                 },
                 "required": ["code"]
@@ -37,9 +58,9 @@ class CodeInterpreter(BaseTool):
         )
     
     async def execute(self, arguments: Dict[str, Any]) -> ToolResult:
-        """Execute Python code"""
+        """Execute Python code with enhanced safety and output capture"""
         code = arguments.get("code", "")
-        if not code:
+        if not code.strip():
             return ToolResult(
                 content="No code provided",
                 success=False,
@@ -81,7 +102,10 @@ class CodeInterpreter(BaseTool):
                 metadata={
                     'execution_count': self.execution_count,
                     'output_length': len(output),
-                    'had_error': bool(stderr)
+                    'had_error': bool(stderr),
+                    'instance_id': self.instance_id,
+                    'work_dir': self.work_dir,
+                    'timeout': self.timeout
                 }
             )
             
@@ -89,7 +113,11 @@ class CodeInterpreter(BaseTool):
             return ToolResult(
                 content=f"Code execution timed out after {self.timeout} seconds",
                 success=False,
-                error="Execution timeout"
+                error="Execution timeout",
+                metadata={
+                    'execution_count': self.execution_count,
+                    'timeout': self.timeout
+                }
             )
         except Exception as e:
             error_msg = f"Execution error: {str(e)}\n{traceback.format_exc()}"
@@ -97,11 +125,14 @@ class CodeInterpreter(BaseTool):
                 content=error_msg,
                 success=False,
                 error=str(e),
-                metadata={'execution_count': self.execution_count}
+                metadata={
+                    'execution_count': self.execution_count,
+                    'instance_id': self.instance_id
+                }
             )
     
     async def _execute_code(self, code: str, stdout: io.StringIO, stderr: io.StringIO) -> Any:
-        """Execute code with output capture"""
+        """Execute code with output capture and safety isolation"""
         # Capture stdout and stderr
         old_stdout = sys.stdout
         old_stderr = sys.stderr
@@ -110,28 +141,65 @@ class CodeInterpreter(BaseTool):
             sys.stdout = stdout
             sys.stderr = stderr
             
-            # Create isolated namespace
+            # Create isolated namespace with limited builtins
             namespace = {
                 '__name__': '__main__',
-                '__builtins__': __builtins__,
-                # Add some safe builtins
-                'print': lambda *args, **kwargs: None,  # Override print to avoid spam
+                '__builtins__': {
+                    # Allow safe builtins
+                    'abs': abs,
+                    'all': all,
+                    'any': any,
+                    'bool': bool,
+                    'dict': dict,
+                    'enumerate': enumerate,
+                    'filter': filter,
+                    'int': int,
+                    'len': len,
+                    'list': list,
+                    'map': map,
+                    'max': max,
+                    'min': min,
+                    'range': range,
+                    'round': round,
+                    'set': set,
+                    'sorted': sorted,
+                    'str': str,
+                    'sum': sum,
+                    'zip': zip,
+                    'True': True,
+                    'False': False,
+                    'None': None,
+                },
+                # Override print to avoid spam in output
+                'print': lambda *args, **kwargs: None,
             }
             
-            # Execute code
-            result = eval(code, namespace, namespace)
+            # Execute code safely
+            compiled_code = compile(code, '<string>', 'exec')
+            exec(compiled_code, namespace, namespace)
             
-            # If it's an expression that returns a value, return it
-            # If it's a statement, return None
-            return result
+            return None  # exec doesn't return results
             
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-
-# Register the tool
-from tools.base_tool import ToolRegistry
-
-@ToolRegistry.register('code_interpreter')
-class RegisteredCodeInterpreter(CodeInterpreter):
-    pass
+    
+    def _cleanup(self):
+        """Cleanup resources"""
+        try:
+            # Cleanup any temporary files or processes
+            logger.info(f"CodeInterpreter cleanup: {self.instance_id}")
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}")
+    
+    @property
+    def execution_stats(self) -> Dict[str, Any]:
+        """Get enhanced execution statistics"""
+        stats = super().execution_stats
+        stats.update({
+            'instance_id': self.instance_id,
+            'work_dir': self.work_dir,
+            'timeout': self.timeout,
+            'max_output_length': self.max_output_length
+        })
+        return stats

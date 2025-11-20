@@ -11,7 +11,10 @@ from tools.base_tool import BaseTool, ToolResult
 logger = logging.getLogger(__name__)
 
 class FnCallAgent(BaseAgent):
-    """Function calling agent"""
+    """Function calling agent with registry support"""
+    
+    # Registry metadata
+    __agent_name__ = 'fncall_agent'
     
     def __init__(self, config: AgentConfig):
         super().__init__(config)

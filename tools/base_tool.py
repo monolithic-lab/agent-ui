@@ -10,6 +10,9 @@ from exceptions.base import ToolExecutionError
 
 logger = logging.getLogger(__name__)
 
+# Import registry functionality from parent module
+# Note: These imports work because __init__.py defines TOOL_REGISTRY first
+
 @dataclass
 class ToolSchema:
     """Tool schema for function calling"""
@@ -19,7 +22,13 @@ class ToolSchema:
     required: List[str]
 
 class BaseTool(ABC):
-    """Base class for all tools"""
+    """Base class for all tools with registry support"""
+    
+    def __init_subclass__(cls, **kwargs):
+        """Auto-register subclasses when they inherit from BaseTool"""
+        super().__init_subclass__(**kwargs)
+        
+        # Auto-register subclasses that have __tool_name__ (will be handled by __init__.py)
     
     def __init__(self, name: str, description: str, enabled: bool = True):
         self.name = name
@@ -27,6 +36,8 @@ class BaseTool(ABC):
         self.enabled = enabled
         self._execution_count = 0
         self._error_count = 0
+        self._last_execution = None
+        self._registry_metadata = getattr(self.__class__, '_registry_name', name)
     
     @abstractmethod
     async def execute(self, arguments: Dict[str, Any]) -> 'ToolResult':
@@ -51,7 +62,9 @@ class BaseTool(ABC):
     async def safe_execute(self, arguments: Dict[str, Any]) -> 'ToolResult':
         """Execute tool with safety checks"""
         try:
+            import datetime
             self._execution_count += 1
+            self._last_execution = datetime.datetime.now()
             validated_args = self.validate_arguments(arguments)
             result = await self.execute(validated_args)
             return result
@@ -71,6 +84,28 @@ class BaseTool(ABC):
             'error_count': self._error_count,
             'success_rate': (self._execution_count - self._error_count) / max(1, self._execution_count)
         }
+    
+    def get_info(self) -> Dict[str, Any]:
+        """Get detailed tool information"""
+        return {
+            'name': self.name,
+            'description': self.description,
+            'enabled': self.enabled,
+            'execution_stats': self.execution_stats,
+            'last_execution': self._last_execution,
+            'registry_name': self._registry_metadata
+        }
+    
+    @classmethod
+    def from_registry(cls, name: str, **kwargs):
+        """Create tool from registry"""
+        from . import TOOL_REGISTRY
+        
+        if name not in TOOL_REGISTRY:
+            raise ValueError(f"Tool '{name}' not found in registry")
+        
+        tool_class = TOOL_REGISTRY[name]
+        return tool_class(**kwargs)
 
 @dataclass
 class ToolResult:

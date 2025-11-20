@@ -9,7 +9,10 @@ from llm.schema import Message
 logger = logging.getLogger(__name__)
 
 class Assistant(FnCallAgent):
-    """Main user-facing assistant agent"""
+    """Main user-facing assistant agent with registry support"""
+    
+    # Registry metadata
+    __agent_name__ = 'assistant'
     
     def __init__(self, config: AgentConfig):
         super().__init__(config)
