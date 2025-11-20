@@ -1,14 +1,148 @@
-# agents/fncall_agent.py
+# agents/base.py
+import asyncio
 import logging
-from typing import List, Dict, Any, AsyncIterator, Optional
-import json
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Iterator, AsyncIterator
+from dataclasses import dataclass
 
-from agents.base_agent import BaseAgent, AgentConfig
-from exceptions.base import ModelServiceError
-from llm.schema import ASSISTANT, Message, FunctionCall, ToolCall
-from tools.base_tool import BaseTool, ToolResult
+from llm.base import BaseChatModel
+from tools.base import BaseTool
+from core.exceptions import ModelServiceError
+from core.schemas import Message
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class AgentConfig:
+    """Configuration for agent"""
+    name: str
+    description: str
+    system_message: str
+    llm: Optional[BaseChatModel] = None
+    tools: Optional[List[BaseTool]] = None
+    max_iterations: int = 10
+    temperature: float = 0.7
+    max_tokens: Optional[int] = None
+    rag_enabled: bool = False
+    memory_enabled: bool = False
+
+class BaseAgent(ABC):
+    """Base class for all agents with registry support"""
+    
+    # Registry metadata - override in subclasses
+    __agent_name__ = 'base_agent'
+    
+    def __init__(self, config: AgentConfig):
+        self.config = config
+        self.tools = config.tools or []
+        self.llm = config.llm
+        self._iteration_count = 0
+        self._system_messages = [Message(role='system', content=config.system_message)]
+        
+    async def run(
+        self, 
+        messages: List[Message],
+        **kwargs
+    ) -> Iterator[List[Message]]:
+        """Main agent execution - yields response messages"""
+        self._iteration_count = 0
+        async for response in self._run(messages, **kwargs):
+            yield response
+    
+    @abstractmethod
+    async def _run(
+        self, 
+        messages: List[Message], 
+        **kwargs
+    ) -> AsyncIterator[List[Message]]:
+        """Core agent logic - to be implemented by subclasses"""
+        pass
+    
+    async def _call_llm(
+        self, 
+        messages: List[Message],
+        **kwargs
+    ) -> List[Message]:
+        """Call LLM with retry and error handling"""
+        if not self.llm:
+            raise ModelServiceError(message="No LLM configured")
+        
+        try:
+            response = await self.llm.chat_with_retry(
+                messages=messages,
+                tools=[tool.get_schema() for tool in self.tools if tool.enabled],
+                **kwargs
+            )
+            return response
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            raise self.llm._handle_provider_error(e)
+    
+    def _check_iteration_limit(self) -> None:
+        """Check if iteration limit exceeded"""
+        if self._iteration_count >= self.config.max_iterations:
+            raise ModelServiceError(
+                message=f"Maximum iterations ({self.config.max_iterations}) exceeded"
+            )
+    
+    def _reset_iteration_count(self) -> None:
+        """Reset iteration counter"""
+        self._iteration_count = 0
+    
+    def add_tool(self, tool: BaseTool) -> None:
+        """Add a tool to the agent"""
+        self.tools.append(tool)
+    
+    def remove_tool(self, tool_name: str) -> None:
+        """Remove a tool from the agent"""
+        self.tools = [tool for tool in self.tools if tool.name != tool_name]
+    
+    def get_tools(self) -> List[BaseTool]:
+        """Get all enabled tools"""
+        return [tool for tool in self.tools if tool.enabled]
+    
+    def get_info(self) -> Dict[str, Any]:
+        """Get detailed agent information"""
+        return {
+            'name': self.config.name,
+            'description': self.config.description,
+            'agent_type': self.__agent_name__,
+            'tools_count': len(self.tools),
+            'tools_enabled': len([tool for tool in self.tools if tool.enabled]),
+            'iterations': self._iteration_count,
+            'registry_name': getattr(self.__class__, '_registry_name', self.__agent_name__)
+        }
+    
+    @classmethod
+    def from_registry(cls, agent_name: str, **kwargs):
+        """Create agent from registry"""
+        from .registry import AGENT_REGISTRY
+        
+        if agent_name not in AGENT_REGISTRY:
+            raise ValueError(f"Agent '{agent_name}' not found in registry")
+        
+        agent_class = AGENT_REGISTRY[agent_name]
+        return agent_class(**kwargs)
+    
+    @property
+    def execution_stats(self) -> Dict[str, Any]:
+        """Get agent execution statistics"""
+        return {
+            'name': self.config.name,
+            'agent_type': self.__agent_name__,
+            'total_iterations': self._iteration_count,
+            'tools_count': len(self.tools),
+            'tools_enabled': len([tool for tool in self.tools if tool.enabled]),
+            'llm_configured': self.llm is not None
+        }
+
+
+# Function calling agent implementation
+import json
+from .base import BaseAgent, AgentConfig
+from core.exceptions import ModelServiceError
+from core.schemas import ASSISTANT, Message, FunctionCall, ToolCall
+from tools.base import BaseTool, ToolResult
 
 class FnCallAgent(BaseAgent):
     """Function calling agent with registry support"""
@@ -159,10 +293,3 @@ class FnCallAgent(BaseAgent):
             tool_call_id=tool_call_id,
             metadata={'tool_name': tool_name, 'error': error}
         )
-
-# Register the agent
-from agents.base_agent import AgentRegistry
-
-@AgentRegistry.register('fncall')
-class RegisteredFnCallAgent(FnCallAgent):
-    pass

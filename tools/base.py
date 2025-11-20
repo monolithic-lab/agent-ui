@@ -1,4 +1,4 @@
-# tools/base_tool.py
+# tools/base.py
 import asyncio
 import logging
 import json
@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
-from exceptions.base import ToolExecutionError
+from core.exceptions import ToolExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class BaseTool(ABC):
     @classmethod
     def from_registry(cls, name: str, **kwargs):
         """Create tool from registry"""
-        from . import TOOL_REGISTRY
+        from .registry import TOOL_REGISTRY
         
         if name not in TOOL_REGISTRY:
             raise ValueError(f"Tool '{name}' not found in registry")
@@ -117,7 +117,7 @@ class ToolResult:
     
     def to_message(self, tool_call_id: str) -> 'Message':
         """Convert to message for conversation"""
-        from llm.schema import Message
+        from core.schemas import Message
         
         if self.success:
             return Message(

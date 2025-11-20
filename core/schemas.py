@@ -1,4 +1,4 @@
-# llm/schema.py
+# core/schemas.py
 """
 Message schemas and models for LLM interactions
 Inspired by OpenAI and Anthropic patterns

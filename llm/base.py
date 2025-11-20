@@ -1,11 +1,11 @@
-# llm/base_chat_model.py
+# llm/base.py
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union, AsyncIterator
 from asyncio import StreamReader
 
-from .schema import Message, ASSISTANT, ToolCall, FunctionCall
-from provider import BaseProvider, ModelResponse
+from core.schemas import Message, ASSISTANT, ToolCall, FunctionCall
+from core.provider import BaseProvider, ModelResponse
 from utils.performance import monitor_performance
 
 logger = logging.getLogger(__name__)

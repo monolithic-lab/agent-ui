@@ -1,4 +1,4 @@
-# database.py
+# core/database.py
 import os
 import logging
 from datetime import datetime, timezone

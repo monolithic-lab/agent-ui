@@ -1,4 +1,4 @@
-# utils/response_cache.py
+# utils/cache.py
 """
 Response Caching System
 Intelligent caching of LLM responses for performance optimization
@@ -14,9 +14,14 @@ from typing import Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-import diskcache as dc
 
 logger = logging.getLogger(__name__)
+
+try:
+    import diskcache as dc
+except ImportError:
+    dc = None
+    logger.warning("diskcache not installed. Cache will use memory-based storage only.")
 
 class CacheStrategy(Enum):
     """Cache strategies for different scenarios"""
@@ -99,21 +104,37 @@ class ResponseCache:
     def __init__(self, config: CacheConfig = None):
         self.config = config or CacheConfig()
         
-        # Initialize cache storage
-        self._cache_dir = Path(self.config.cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        # Memory-based fallback if diskcache not available
+        self._memory_cache: Dict[str, Any] = {}
+        self._memory_metadata: Dict[str, CacheEntry] = {}
         
-        # Main cache for exact matches
-        self._main_cache = dc.Cache(str(self._cache_dir / "main"), size_limit=self.config.max_cache_size_mb * 1024 * 1024)
-        
-        # Similarity cache for semantic matches
-        if self.config.enable_similarity_cache:
-            self._similarity_cache = dc.Cache(str(self._cache_dir / "similarity"), size_limit=self.config.max_similarity_cache_size * 1024 * 1024)
+        # Initialize diskcache storage if available
+        if dc:
+            try:
+                self._cache_dir = Path(self.config.cache_dir)
+                self._cache_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Main cache for exact matches
+                self._main_cache = dc.Cache(str(self._cache_dir / "main"), size_limit=self.config.max_cache_size_mb * 1024 * 1024)
+                
+                # Similarity cache for semantic matches
+                if self.config.enable_similarity_cache:
+                    self._similarity_cache = dc.Cache(str(self._cache_dir / "similarity"), size_limit=self.config.max_similarity_cache_size * 1024 * 1024)
+                else:
+                    self._similarity_cache = None
+                
+                # Metadata storage
+                self._metadata_cache = dc.Cache(str(self._cache_dir / "metadata"), size_limit=10 * 1024 * 1024)
+                
+            except Exception as e:
+                logger.warning(f"Diskcache initialization failed, using memory-only cache: {e}")
+                self._main_cache = None
+                self._similarity_cache = None
+                self._metadata_cache = None
         else:
+            self._main_cache = None
             self._similarity_cache = None
-        
-        # Metadata storage
-        self._metadata_cache = dc.Cache(str(self._cache_dir / "metadata"), size_limit=10 * 1024 * 1024)
+            self._metadata_cache = None
         
         # Statistics
         self._stats = {
@@ -154,11 +175,13 @@ class ResponseCache:
             except asyncio.CancelledError:
                 pass
         
-        # Close caches
-        self._main_cache.close()
+        # Close disk caches
+        if self._main_cache:
+            self._main_cache.close()
         if self._similarity_cache:
             self._similarity_cache.close()
-        self._metadata_cache.close()
+        if self._metadata_cache:
+            self._metadata_cache.close()
         
         logger.info("ResponseCache stopped")
     
@@ -266,18 +289,26 @@ class ResponseCache:
                 pass
             
             # Store in main cache
-            self._main_cache[cache_key] = {
+            cache_data = {
                 'response': response,
                 'entry': cache_entry,
                 'request': request
             }
             
-            # Store metadata
-            self._metadata_cache[cache_key] = cache_entry
-            
-            # Store in similarity cache for semantic matching
-            if self.config.enable_similarity_cache:
-                await self._store_similarity_entry(request, response, cache_key)
+            if self._main_cache:
+                self._main_cache[cache_key] = cache_data
+                self._metadata_cache[cache_key] = cache_entry
+                
+                # Store in similarity cache for semantic matching
+                if self.config.enable_similarity_cache:
+                    await self._store_similarity_entry(request, response, cache_key)
+            else:
+                # Memory-only storage
+                self._memory_cache[cache_key] = cache_data
+                self._memory_metadata[cache_key] = cache_entry
+                
+                if self.config.enable_similarity_cache:
+                    await self._store_similarity_entry(request, response, cache_key)
             
             # Update statistics
             self._stats['cache_size_mb'] = self._calculate_cache_size()
@@ -305,33 +336,57 @@ class ResponseCache:
         try:
             if key:
                 # Invalidate specific key
-                if key in self._main_cache:
+                if self._main_cache and key in self._main_cache:
                     del self._main_cache[key]
                     invalidated += 1
                 
-                if key in self._metadata_cache:
+                if self._metadata_cache and key in self._metadata_cache:
                     del self._metadata_cache[key]
                 
                 if self._similarity_cache and key in self._similarity_cache:
                     del self._similarity_cache[key]
                 
+                # Memory cache
+                if key in self._memory_cache:
+                    del self._memory_cache[key]
+                    invalidated += 1
+                
+                if key in self._memory_metadata:
+                    del self._memory_metadata[key]
+            
             elif pattern:
                 # Invalidate by pattern (simplified implementation)
                 keys_to_remove = []
-                for cached_key in self._main_cache:
+                
+                # Check disk caches
+                if self._main_cache:
+                    for cached_key in self._main_cache:
+                        if pattern in cached_key:
+                            keys_to_remove.append(cached_key)
+                
+                # Check memory cache
+                for cached_key in self._memory_cache:
                     if pattern in cached_key:
                         keys_to_remove.append(cached_key)
                 
                 for key_to_remove in keys_to_remove:
-                    del self._main_cache[key_to_remove]
-                    invalidated += 1
-                
-                # Remove from metadata and similarity caches
-                for key_to_remove in keys_to_remove:
-                    if key_to_remove in self._metadata_cache:
+                    if self._main_cache and key_to_remove in self._main_cache:
+                        del self._main_cache[key_to_remove]
+                        invalidated += 1
+                    
+                    if self._metadata_cache and key_to_remove in self._metadata_cache:
                         del self._metadata_cache[key_to_remove]
+                    
                     if self._similarity_cache and key_to_remove in self._similarity_cache:
                         del self._similarity_cache[key_to_remove]
+                    
+                    # Memory cache
+                    if key_to_remove in self._memory_cache:
+                        del self._memory_cache[key_to_remove]
+                        invalidated += 1
+                    
+                    if key_to_remove in self._memory_metadata:
+                        del self._memory_metadata[key_to_remove]
             
             logger.info("Invalidated %d cache entries", invalidated)
             return invalidated
@@ -342,14 +397,14 @@ class ResponseCache:
     
     async def _get_exact_match(self, cache_key: str, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Get exact match from cache"""
-        if cache_key in self._main_cache:
+        if self._main_cache and cache_key in self._main_cache:
             cached_data = self._main_cache[cache_key]
             entry = cached_data['entry']
             
             # Check if expired
             if entry.is_expired():
                 del self._main_cache[cache_key]
-                if cache_key in self._metadata_cache:
+                if self._metadata_cache and cache_key in self._metadata_cache:
                     del self._metadata_cache[cache_key]
                 return None
             
@@ -359,11 +414,28 @@ class ResponseCache:
             
             return cached_data['response']
         
+        # Check memory cache
+        if cache_key in self._memory_cache:
+            cached_data = self._memory_cache[cache_key]
+            entry = cached_data['entry']
+            
+            if entry.is_expired():
+                del self._memory_cache[cache_key]
+                if cache_key in self._memory_metadata:
+                    del self._memory_metadata[cache_key]
+                return None
+            
+            # Update access statistics
+            entry.access()
+            self._memory_metadata[cache_key] = entry
+            
+            return cached_data['response']
+        
         return None
     
     async def _get_similarity_match(self, cache_key: str, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Get similarity match from cache"""
-        if not self._similarity_cache:
+        if not self._similarity_cache and not hasattr(self, '_memory_similarity_cache'):
             return None
         
         # Get semantic features of request
@@ -374,26 +446,51 @@ class ResponseCache:
         best_similarity = 0.0
         
         try:
-            for cached_key, cached_features in self._similarity_cache.items():
-                similarity = self._calculate_similarity(request_features, cached_features)
-                
-                if similarity > best_similarity and similarity >= self.config.similarity_threshold:
-                    best_similarity = similarity
-                    best_match = cached_key
+            # Check similarity cache
+            if self._similarity_cache:
+                for cached_key, cached_features in self._similarity_cache.items():
+                    similarity = self._calculate_similarity(request_features, cached_features)
+                    
+                    if similarity > best_similarity and similarity >= self.config.similarity_threshold:
+                        best_similarity = similarity
+                        best_match = cached_key
+            else:
+                # Memory similarity cache
+                for cached_key, cached_features in getattr(self, '_memory_similarity_cache', {}).items():
+                    similarity = self._calculate_similarity(request_features, cached_features)
+                    
+                    if similarity > best_similarity and similarity >= self.config.similarity_threshold:
+                        best_similarity = similarity
+                        best_match = cached_key
+                        
         except Exception as e:
             logger.warning("Similarity cache iteration error: %s", e)
             return None
         
         if best_match:
             # Check if the best match is still valid
-            if best_match in self._main_cache:
+            if (self._main_cache and best_match in self._main_cache):
                 cached_data = self._main_cache[best_match]
                 entry = cached_data['entry']
                 
                 if not entry.is_expired():
                     # Update access statistics
                     entry.access()
-                    self._metadata_cache[best_match] = entry
+                    if self._metadata_cache:
+                        self._metadata_cache[best_match] = entry
+                    
+                    logger.debug("Found similarity match (%.2f%% similar)", best_similarity * 100)
+                    return cached_data['response']
+            
+            # Check memory cache
+            elif best_match in self._memory_cache:
+                cached_data = self._memory_cache[best_match]
+                entry = cached_data['entry']
+                
+                if not entry.is_expired():
+                    # Update access statistics
+                    entry.access()
+                    self._memory_metadata[best_match] = entry
                     
                     logger.debug("Found similarity match (%.2f%% similar)", best_similarity * 100)
                     return cached_data['response']
@@ -406,7 +503,30 @@ class ResponseCache:
         request_content = self._extract_content_string(request)
         
         try:
-            for cached_key, cached_data in self._main_cache.items():
+            # Check disk cache
+            if self._main_cache:
+                for cached_key, cached_data in self._main_cache.items():
+                    if isinstance(cached_data, dict) and 'entry' in cached_data:
+                        entry = cached_data['entry']
+                        
+                        if entry.is_expired():
+                            continue
+                        
+                        cached_request = cached_data['request']
+                        cached_content = self._extract_content_string(cached_request)
+                        
+                        # Check for partial content overlap
+                        if self._calculate_content_overlap(request_content, cached_content) > 0.5:
+                            # Update access statistics
+                            entry.access()
+                            if self._metadata_cache:
+                                self._metadata_cache[cached_key] = entry
+                            
+                            logger.debug("Found partial match")
+                            return cached_data['response']
+            
+            # Check memory cache
+            for cached_key, cached_data in self._memory_cache.items():
                 if isinstance(cached_data, dict) and 'entry' in cached_data:
                     entry = cached_data['entry']
                     
@@ -420,7 +540,7 @@ class ResponseCache:
                     if self._calculate_content_overlap(request_content, cached_content) > 0.5:
                         # Update access statistics
                         entry.access()
-                        self._metadata_cache[cached_key] = entry
+                        self._memory_metadata[cached_key] = entry
                         
                         logger.debug("Found partial match")
                         return cached_data['response']
@@ -435,7 +555,32 @@ class ResponseCache:
         request_str = self._extract_content_string(request)
         
         try:
-            for cached_key, cached_data in self._main_cache.items():
+            # Check disk cache
+            if self._main_cache:
+                for cached_key, cached_data in self._main_cache.items():
+                    if isinstance(cached_data, dict) and 'entry' in cached_data:
+                        entry = cached_data['entry']
+                        
+                        if entry.is_expired():
+                            continue
+                        
+                        cached_request = cached_data['request']
+                        cached_content = self._extract_content_string(cached_request)
+                        
+                        # Simple fuzzy matching using string similarity
+                        similarity = self._calculate_string_similarity(request_str, cached_content)
+                        
+                        if similarity > 0.7:  # Threshold for fuzzy matching
+                            # Update access statistics
+                            entry.access()
+                            if self._metadata_cache:
+                                self._metadata_cache[cached_key] = entry
+                            
+                            logger.debug("Found fuzzy match (%.2f%% similar)", similarity * 100)
+                            return cached_data['response']
+            
+            # Check memory cache
+            for cached_key, cached_data in self._memory_cache.items():
                 if isinstance(cached_data, dict) and 'entry' in cached_data:
                     entry = cached_data['entry']
                     
@@ -451,7 +596,7 @@ class ResponseCache:
                     if similarity > 0.7:  # Threshold for fuzzy matching
                         # Update access statistics
                         entry.access()
-                        self._metadata_cache[cached_key] = entry
+                        self._memory_metadata[cached_key] = entry
                         
                         logger.debug("Found fuzzy match (%.2f%% similar)", similarity * 100)
                         return cached_data['response']
@@ -463,6 +608,12 @@ class ResponseCache:
     async def _store_similarity_entry(self, request: Dict[str, Any], response: Dict[str, Any], cache_key: str):
         """Store entry in similarity cache"""
         if not self._similarity_cache:
+            # Use memory-based similarity cache
+            if not hasattr(self, '_memory_similarity_cache'):
+                self._memory_similarity_cache = {}
+            
+            features = self._extract_semantic_features(request)
+            self._memory_similarity_cache[cache_key] = features
             return
         
         features = self._extract_semantic_features(request)
@@ -587,13 +738,19 @@ class ResponseCache:
     
     def _calculate_cache_size(self) -> float:
         """Calculate total cache size in MB"""
-        main_size = self._main_cache.volume() / (1024 * 1024)
+        total_size = 0.0
+        
+        # Calculate memory cache size
+        total_size += sum(len(pickle.dumps(data)) for data in self._memory_cache.values()) / (1024 * 1024)
+        
+        # Calculate disk cache size if available
+        if self._main_cache:
+            total_size += self._main_cache.volume() / (1024 * 1024)
         
         if self._similarity_cache:
-            similarity_size = self._similarity_cache.volume() / (1024 * 1024)
-            return main_size + similarity_size
+            total_size += self._similarity_cache.volume() / (1024 * 1024)
         
-        return main_size
+        return total_size
     
     async def _cleanup_loop(self):
         """Background cleanup loop"""
@@ -611,21 +768,37 @@ class ResponseCache:
         try:
             current_time = time.time()
             
-            # Remove expired entries
+            # Remove expired entries from memory cache
             expired_keys = []
-            for key, entry in self._metadata_cache.items():
+            for key, entry in self._memory_metadata.items():
                 if entry.is_expired(current_time):
                     expired_keys.append(key)
             
             for key in expired_keys:
-                if key in self._main_cache:
-                    del self._main_cache[key]
-                if key in self._similarity_cache:
-                    del self._similarity_cache[key]
-                if key in self._metadata_cache:
-                    del self._metadata_cache[key]
+                if key in self._memory_cache:
+                    del self._memory_cache[key]
+                if key in self._memory_metadata:
+                    del self._memory_metadata[key]
+                if hasattr(self, '_memory_similarity_cache') and key in self._memory_similarity_cache:
+                    del self._memory_similarity_cache[key]
             
             self._stats['evictions'] += len(expired_keys)
+            
+            # Remove expired entries from disk caches
+            if self._metadata_cache:
+                expired_keys = []
+                for key, entry in self._metadata_cache.items():
+                    if entry.is_expired(current_time):
+                        expired_keys.append(key)
+                
+                for key in expired_keys:
+                    if key in self._main_cache:
+                        del self._main_cache[key]
+                    if key in self._similarity_cache:
+                        del self._similarity_cache[key]
+                    del self._metadata_cache[key]
+                
+                self._stats['evictions'] += len(expired_keys)
             
             # Evict based on policy
             await self._evict_entries()
@@ -643,46 +816,6 @@ class ResponseCache:
         # Note: diskcache handles eviction automatically based on size limits
         # Custom eviction policies would be implemented here for advanced cases
         pass
-    
-    async def _evict_lru(self):
-        """Evict least recently used entries"""
-        # This is a simplified implementation
-        # Real implementation would be more sophisticated
-        pass
-    
-    async def _evict_lfu(self):
-        """Evict least frequently used entries"""
-        # This is a simplified implementation
-        # Real implementation would be more sophisticated
-        pass
-    
-    async def _evict_by_size(self):
-        """Evict entries by cache size"""
-        current_size = self._calculate_cache_size()
-        
-        if current_size > self.config.max_cache_size_mb * 0.9:  # 90% threshold
-            # Remove oldest entries until under limit
-            entries = [(key, entry) for key, entry in self._metadata_cache.items()]
-            entries.sort(key=lambda x: x[1].last_accessed)  # Sort by last access
-            
-            target_size = self.config.max_cache_size_mb * 0.8  # 80% target
-            evicted_size = 0
-            
-            for key, entry in entries[:len(entries)//2]:  # Remove half
-                if key in self._main_cache:
-                    evicted_size += entry.size_bytes / (1024 * 1024)
-                    del self._main_cache[key]
-                
-                if key in self._similarity_cache:
-                    del self._similarity_cache[key]
-                
-                if key in self._metadata_cache:
-                    del self._metadata_cache[key]
-                
-                if current_size - evicted_size <= target_size:
-                    break
-            
-            self._stats['evictions'] += len(entries)//2
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get cache statistics"""

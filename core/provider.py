@@ -1,4 +1,4 @@
-# provider.py
+# core/provider.py
 import asyncio
 import json
 import logging
@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union, AsyncGenerator
 from dataclasses import dataclass
 
-from exceptions.base import ModelServiceError, ProviderError
+from core.exceptions import ModelServiceError, ProviderError
 from utils.retry import retry_with_backoff_async
 
 logger = logging.getLogger(__name__)

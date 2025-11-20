@@ -1,4 +1,4 @@
-# client.py
+# core/client.py
 import os
 import sys
 import uuid
@@ -20,8 +20,8 @@ from mcp.client.stdio import stdio_client
 from mcp import StdioServerParameters, ClientSession
 from typing import Dict, Any, Optional, List, AsyncGenerator, Union
 
-from database import Session, Message, UserSettings
-from provider import (
+from core.database import Session, Message, UserSettings
+from core.provider import (
     ModelResponse,
     ProviderInfo,
     BaseProvider,

@@ -16,32 +16,41 @@
 ## 2. Repository Structure
 
 ### Core Architecture
+
 ```
 agent-ui/
-├── client.py                      # Main orchestration layer 
-├── database.py                    # MongoDB persistence layer 
-├── provider.py                    # Multi-provider abstraction 
-├── mcp_hf_server.py              # HuggingFace Hub MCP server 
+├── core/                         # Core system components
+│   ├── client.py                # Main orchestration layer 
+│   ├── database.py              # MongoDB persistence layer 
+│   ├── provider.py              # Multi-provider abstraction 
+│   ├── exceptions.py            # Error handling hierarchy
+│   └── schemas.py               # Data schemas and models
 │
 ├── agents/                       # Agent orchestration system
-│   ├── base_agent.py            # Base agent and registry
-│   ├── fncall_agent.py          # Function calling agent
+│   ├── base.py                  # Base agent (merged from base_agent.py + fncall_agent.py)
+│   ├── registry.py              # Agent registration and factory
 │   └── assistant.py             # Main assistant agent
 │
+├── llm/                          # Language model interfaces
+│   ├── base.py                  # Base chat model interface
+│   ├── adapters/                # Provider-specific adapters
+│   └── prompts/                 # Prompt templates
+│
 ├── tools/                        # Tool system
-│   ├── base_tool.py             # Base tool framework
-│   └── code_interpreter.py      # Sandboxed code execution
+│   ├── base.py                  # Base tool framework (from base_tool.py)
+│   ├── registry.py              # Tool registration system
+│   ├── code_interpreter.py      # Sandboxed code execution
+│   └── mcp_manager.py           # MCP tool management
 │
-├── exceptions/                   # Error handling system
-│   └── base.py                  # Exception hierarchy
-│
-├── utils/                        # Utilities
-│   ├── retry.py                 # Exponential backoff retry
+├── utils/                        # Utilities and safety
+│   ├── safety.py                # Safety systems (merged loop detection)
+│   ├── cache.py                 # Response caching (from response_cache.py)
+│   ├── parallel.py              # Parallel execution utilities
 │   ├── performance.py           # Performance monitoring
-│   └── parallel.py              # Parallel execution
+│   └── retry.py                 # Exponential backoff retry
 │
-├── safety/                       # Safety systems
-│   └── loop_detection.py        # Infinite loop prevention
+├── servers/                      # MCP server implementations
+│   └── mcp_hf_server.py         # HuggingFace Hub MCP server
 │
 ├── monitoring/                   # Production monitoring
 │   └── metrics.py               # Metrics and health checks
@@ -52,11 +61,6 @@ agent-ui/
 │   └── config.py                # Configuration management
 │
 ├── tests/                        # Test suite
-│   ├── conftest.py              # Test fixtures
-│   ├── test_exceptions.py       # Exception tests
-│   ├── test_retry.py            # Retry logic tests
-│   ├── test_safety.py           # Safety system tests
-│   └── test_agents.py           # Agent system tests
 │
 ├── requirements.txt              # Production dependencies
 ├── pyproject.toml               # Project configuration
@@ -88,36 +92,28 @@ agent-ui/
 - `_handle_provider_error` - Structured error conversion
 
 **agents/** - Enterprise agent orchestration system:
-- `BaseAgent` - Abstract base class with tool management and iteration control
-- `AgentConfig` - Configuration dataclass with RAG and memory support
-- `AgentRegistry` - Dynamic agent registration and creation system
-- `FnCallAgent` - Function calling agent with tool execution
+- `base.py` - Merged agent base (BaseAgent + FnCallAgent) with tool management and iteration control
+- `registry.py` - AgentRegistry for dynamic agent registration and creation system
 - `Assistant` - Main user-facing agent with preprocessing capabilities
 
 **tools/** - Advanced tool system:
-- `BaseTool` - Abstract base class with schema validation and safety
-- `ToolSchema` - Structured tool definition for function calling
-- `ToolResult` - Standardized tool execution results
-- `ToolRegistry` - Dynamic tool registration and management
-- `CodeInterpreter` - Sandboxed Python code execution with timeout
+- `base.py` - BaseTool framework with schema validation and safety
+- `registry.py` - ToolRegistry for dynamic tool registration and management
+- `code_interpreter.py` - Sandboxed Python code execution with timeout
+- `mcp_manager.py` - MCP tool orchestration and management
 
-**exceptions/** - Comprehensive error hierarchy:
+**core/exceptions.py** - Comprehensive error hierarchy:
 - `ModelServiceError` - Structured error with code, message, and metadata
 - `ProviderError` - Base class for provider-specific errors
 - `RateLimitError`, `AuthenticationError`, `ValidationError` - Specialized errors
 - `ToolExecutionError`, `LoopDetectionError` - System-specific errors
 
 **utils/** - Performance and reliability utilities:
-- `retry_with_backoff()` - Exponential backoff retry with jitter
-- `PerformanceMonitor` - Metrics collection and performance tracking
-- `AsyncLimiter` - Concurrency limiting for resource management
-- `parallel_execution()` - Concurrent task execution utilities
-
-**safety/** - Enterprise safety systems:
-- `LoopDetector` - Advanced loop detection with multiple strategies
-- `detect_loop()` - Global loop detection integration
-- Session isolation and iteration limit enforcement
-- Content repetition detection and tool call pattern analysis
+- `safety.py` - Enterprise safety systems with LoopDetector and loop detection integration
+- `cache.py` - Response caching for performance optimization
+- `parallel.py` - AsyncLimiter and parallel execution utilities
+- `performance.py` - PerformanceMonitor for metrics collection and tracking
+- `retry.py` - Exponential backoff retry with jitter utilities
 
 **monitoring/** - Production-grade monitoring:
 - `MetricsCollector` - Periodic metrics collection and database storage
@@ -131,7 +127,7 @@ agent-ui/
 - Multi-provider support with environment variable integration
 - Session management and interactive chat capabilities
 
-**mcp_hf_server.py** - HuggingFace intelligence:
+**servers/mcp_hf_server.py** - HuggingFace intelligence:
 - `HuggingFaceHubMCPServer` - Unified HF intelligence server
 - 8 specialized tools for model/dataset/space analysis
 - Advanced search and filtering capabilities
@@ -419,7 +415,7 @@ config = {
         {
             "name": "huggingface",
             "command": "python",
-            "args": ["mcp_hf_server.py"],
+            "args": ["servers/mcp_hf_server.py"],
             "auto_connect": True
         }
     ]

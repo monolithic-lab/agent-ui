@@ -1,7 +1,7 @@
 # llm/__init__.py
 """LLM package for agent-ui framework"""
 
-from .schema import (
+from core.schemas import (
     Message,
     ASSISTANT,
     USER,
@@ -13,7 +13,7 @@ from .schema import (
     CHAT_MESSAGE
 )
 
-from .base_chat_model import BaseChatModel
+from .base import BaseChatModel
 
 __all__ = [
     'Message',

@@ -1,4 +1,4 @@
-# exceptions/base.py
+# core/exceptions.py
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
