@@ -2,7 +2,6 @@
 """
 Advanced Loop Detection System
 Prevents infinite loops and repetitive behavior in agent conversations
-Based on sophisticated patterns from Qwen-Agent
 """
 
 import asyncio

@@ -2,7 +2,6 @@
 """
 Response Caching System
 Intelligent caching of LLM responses for performance optimization
-Based on sophisticated patterns from Qwen-Agent
 """
 
 import asyncio

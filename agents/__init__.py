@@ -2,7 +2,6 @@
 """
 Agent-UI Agent System
 Dynamic agent registry and factory pattern implementation
-Mirrors the sophisticated agent architecture of Qwen-Agent
 """
 
 # =============================================================================

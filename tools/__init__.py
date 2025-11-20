@@ -8,7 +8,7 @@ Dynamic tool registry and factory pattern implementation
 # TOOL REGISTRY SYSTEM - Define first to avoid circular imports
 # =============================================================================
 
-# Global tool registry - mirrors Qwen-Agent pattern
+# Global tool registry
 TOOL_REGISTRY = {}
 
 # Tool instances registry - for performance (singleton pattern)

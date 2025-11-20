@@ -2,7 +2,6 @@
 """
 MCP Manager Singleton
 Centralized management of MCP (Model Context Protocol) servers
-Based on sophisticated patterns from Qwen-Agent
 """
 
 import asyncio
