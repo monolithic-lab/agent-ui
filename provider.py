@@ -7,6 +7,9 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union, AsyncGenerator
 from dataclasses import dataclass
 
+from exceptions.base import ModelServiceError, ProviderError
+from utils.retry import retry_with_backoff_async
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -79,6 +82,36 @@ class BaseProvider(ABC):
     def _get_usage_stats(self, response: Any) -> Optional[Dict[str, int]]:
         """Extract usage statistics from response"""
         return None
+    
+    async def create_chat_completion_with_retry(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict]] = None,
+        stream: bool = False,
+        **kwargs
+    ) -> Union[ModelResponse, AsyncGenerator[ModelResponse, None]]:
+        """Create chat completion with automatic retry"""
+        
+        async def _make_request():
+            return await self.create_chat_completion(messages, tools, stream, **kwargs)
+        
+        return await retry_with_backoff_async(_make_request, max_retries=3)
+    
+    def _handle_provider_error(self, error: Exception) -> ModelServiceError:
+        """Convert provider-specific errors to ModelServiceError"""
+        if isinstance(error, Exception):
+            # Extract error information from different providers
+            if hasattr(error, 'status_code'):
+                code = str(error.status_code)
+            elif hasattr(error, 'code'):
+                code = error.code
+            else:
+                code = '500'  # Default server error
+                
+            message = str(error)
+            return ModelServiceError(exception=error, code=code, message=message)
+        
+        return ModelServiceError(exception=error, code='500', message='Unknown error')
 
 # =============================================================================
 # OPENAI PROVIDER

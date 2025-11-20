@@ -1,15 +1,17 @@
 ## 1. High-level Summary
 
-**MCP Agent Framework** is a sophisticated, production-ready multi-provider agent framework built on the Model Context Protocol (MCP).
+**Agent-UI Framework** is a sophisticated, enterprise-grade multi-provider agent framework. Built on the Model Context Protocol (MCP), it provides a complete agent orchestration system with advanced safety, performance monitoring, and production-ready capabilities.
 
-**Core Philosophy**: A **provider-agnostic**, **safety-first** agent framework with enterprise-grade persistence, real-time capabilities, and comprehensive tool orchestration. The system is designed as a **modular microservices architecture** that can scale from single-user deployments to enterprise multi-tenant systems.
+**Core Philosophy**: A **provider-agnostic**, **safety-first** agent framework with enterprise-grade persistence, real-time capabilities, comprehensive tool orchestration, and production monitoring. The system is designed as a **modular microservices architecture** that can scale from single-user deployments to enterprise multi-tenant systems.
 
 **Key Differentiators**:
 - **True multi-provider abstraction** (OpenAI, Anthropic, Gemini, HuggingFace)
-- **Enterprise persistence layer** with MongoDB integration
-- **Real-time WebSocket communication**
-- **Multi-server MCP orchestration** with health monitoring
-- **Safety-first tool execution** with comprehensive error handling
+- **Enterprise agent hierarchy** (BaseAgent → FnCallAgent → Assistant)
+- **Sophisticated error handling** with exponential backoff retry logic
+- **Safety-first design** with loop detection and sandboxed execution
+- **Production monitoring** with metrics collection and health checks
+- **CLI interface** for development and management
+- **Comprehensive testing** with pytest integration
 
 ## 2. Repository Structure
 
@@ -19,7 +21,46 @@ agent-ui/
 ├── client.py                      # Main orchestration layer 
 ├── database.py                    # MongoDB persistence layer 
 ├── provider.py                    # Multi-provider abstraction 
-└── mcp_hf_server.py              # HuggingFace Hub MCP server 
+├── mcp_hf_server.py              # HuggingFace Hub MCP server 
+│
+├── agents/                       # Agent orchestration system
+│   ├── base_agent.py            # Base agent and registry
+│   ├── fncall_agent.py          # Function calling agent
+│   └── assistant.py             # Main assistant agent
+│
+├── tools/                        # Tool system
+│   ├── base_tool.py             # Base tool framework
+│   └── code_interpreter.py      # Sandboxed code execution
+│
+├── exceptions/                   # Error handling system
+│   └── base.py                  # Exception hierarchy
+│
+├── utils/                        # Utilities
+│   ├── retry.py                 # Exponential backoff retry
+│   ├── performance.py           # Performance monitoring
+│   └── parallel.py              # Parallel execution
+│
+├── safety/                       # Safety systems
+│   └── loop_detection.py        # Infinite loop prevention
+│
+├── monitoring/                   # Production monitoring
+│   └── metrics.py               # Metrics and health checks
+│
+├── cli/                          # CLI interface
+│   ├── main.py                  # Main CLI entry
+│   ├── commands.py              # CLI commands
+│   └── config.py                # Configuration management
+│
+├── tests/                        # Test suite
+│   ├── conftest.py              # Test fixtures
+│   ├── test_exceptions.py       # Exception tests
+│   ├── test_retry.py            # Retry logic tests
+│   ├── test_safety.py           # Safety system tests
+│   └── test_agents.py           # Agent system tests
+│
+├── requirements.txt              # Production dependencies
+├── pyproject.toml               # Project configuration
+└── pytest.ini                  # Test configuration
 ```
 
 ### Module Responsibilities
@@ -37,12 +78,58 @@ agent-ui/
 - Cache integration and cleanup policies
 
 **provider.py** - AI provider abstraction:
-- `BaseProvider` - Abstract provider interface
-- `OpenAIProvider` - Async OpenAI with streaming
+- `BaseProvider` - Abstract provider interface with error handling
+- `OpenAIProvider` - Async OpenAI with streaming and retry logic
 - `AnthropicProvider` - Claude with thinking support  
 - `GeminiProvider` - Google AI integration
 - `HuggingFaceProvider` - Inference API support
 - `ProviderFactory` - Dynamic provider initialization
+- `create_chat_completion_with_retry` - Automatic retry with exponential backoff
+- `_handle_provider_error` - Structured error conversion
+
+**agents/** - Enterprise agent orchestration system:
+- `BaseAgent` - Abstract base class with tool management and iteration control
+- `AgentConfig` - Configuration dataclass with RAG and memory support
+- `AgentRegistry` - Dynamic agent registration and creation system
+- `FnCallAgent` - Function calling agent with tool execution
+- `Assistant` - Main user-facing agent with preprocessing capabilities
+
+**tools/** - Advanced tool system:
+- `BaseTool` - Abstract base class with schema validation and safety
+- `ToolSchema` - Structured tool definition for function calling
+- `ToolResult` - Standardized tool execution results
+- `ToolRegistry` - Dynamic tool registration and management
+- `CodeInterpreter` - Sandboxed Python code execution with timeout
+
+**exceptions/** - Comprehensive error hierarchy:
+- `ModelServiceError` - Structured error with code, message, and metadata
+- `ProviderError` - Base class for provider-specific errors
+- `RateLimitError`, `AuthenticationError`, `ValidationError` - Specialized errors
+- `ToolExecutionError`, `LoopDetectionError` - System-specific errors
+
+**utils/** - Performance and reliability utilities:
+- `retry_with_backoff()` - Exponential backoff retry with jitter
+- `PerformanceMonitor` - Metrics collection and performance tracking
+- `AsyncLimiter` - Concurrency limiting for resource management
+- `parallel_execution()` - Concurrent task execution utilities
+
+**safety/** - Enterprise safety systems:
+- `LoopDetector` - Advanced loop detection with multiple strategies
+- `detect_loop()` - Global loop detection integration
+- Session isolation and iteration limit enforcement
+- Content repetition detection and tool call pattern analysis
+
+**monitoring/** - Production-grade monitoring:
+- `MetricsCollector` - Periodic metrics collection and database storage
+- `HealthChecker` - Comprehensive system health assessment
+- Database connectivity, performance, and resource monitoring
+- Real-time health status and performance statistics
+
+**cli/** - Development and management interface:
+- `agent-ui` - Main CLI command for interactive chat
+- `agent-cli config` - Configuration management and setup
+- Multi-provider support with environment variable integration
+- Session management and interactive chat capabilities
 
 **mcp_hf_server.py** - HuggingFace intelligence:
 - `HuggingFaceHubMCPServer` - Unified HF intelligence server
