@@ -1,166 +1,75 @@
 # client.py
-import json
-import sys
 import os
+import sys
+import uuid
+import json
 import asyncio
 import logging
 from pathlib import Path
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from dataclasses import dataclass, asdict
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ASCENDING, DESCENDING
 
 import anthropic
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 import google.generativeai as genai
-from huggingface_hub import InferenceClient
-
+from huggingface_hub import InferenceClient, AsyncInferenceClient
 from mcp.client.stdio import stdio_client
 from mcp import StdioServerParameters, ClientSession
-from typing import List, Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, List, AsyncGenerator, Union
+
+from database import Session, Message, UserSettings
+from provider import (
+    ModelResponse,
+    ProviderInfo,
+    BaseProvider,
+    OpenAIProvider, 
+    AnthropicProvider, 
+    GeminiProvider, 
+    HuggingFaceProvider,
+    ProviderFactory
+)
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ModelResponse:
-    content: str
-    thinking_content: Optional[str] = None
-    tool_calls: Optional[List[Dict]] = None
-    raw_response: Any = None
+class MessageType(str):
+    USER = "user"
+    ASSISTANT = "assistant" 
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    SYSTEM = "system"
 
-class MCPClient:
-    """MCP Client for HuggingFace Hub operations"""
+
+class WebSocketManager:
+    """WebSocket manager for real-time updates (placeholder implementation)"""
     
     def __init__(self):
-        self.session: Optional[ClientSession] = None
-        self.available_tools: List[Dict] = []
-        self._read_stream = None
-        self._write_stream = None
-        self._stdio_context = None
-        self._connected = False
-        logger.info("MCP Client initialized")
+        self.connections: Dict[str, set] = {}  # session_id -> set of connections
+        
+    async def connect(self, connection_id: str, session_id: str):
+        """Handle new connection (placeholder)"""
+        if session_id not in self.connections:
+            self.connections[session_id] = set()
+        self.connections[session_id].add(connection_id)
+        logger.info(f"WebSocket connected: {session_id}")
     
-    async def connect(self, server_params: StdioServerParameters):
-        """Connect to MCP server via stdio"""
-        try:
-            if self._connected:
-                logger.info("MCP client already connected")
-                return True
-                
-            logger.info(f"Connecting to MCP server: {server_params.command}")
-            
-            # Create stdio client connection
-            self._stdio_context = stdio_client(server_params)
-            self._read_stream, self._write_stream = await self._stdio_context.__aenter__()
-            
-            # Initialize session
-            self.session = ClientSession(self._read_stream, self._write_stream)
-            await self.session.__aenter__()
-            
-            # Initialize the connection
-            await self.session.initialize()
-            
-            # Discover available tools
-            await self.discover_tools()
-            
-            self._connected = True
-            logger.info(f"Connected successfully. Found {len(self.available_tools)} tools")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to connect to MCP server: {e}", exc_info=True)
-            await self.disconnect()
-            return False
+    def disconnect(self, connection_id: str, session_id: str):
+        """Handle disconnection (placeholder)"""
+        if session_id in self.connections:
+            self.connections[session_id].discard(connection_id)
+            if not self.connections[session_id]:
+                del self.connections[session_id]
+        logger.info(f"WebSocket disconnected: {session_id}")
     
-    async def discover_tools(self):
-        """Discover available tools from the server"""
-        try:
-            if not self.session:
-                raise RuntimeError("Session not initialized")
-            
-            # List available tools
-            tools_response = await self.session.list_tools()
-            self.available_tools = [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.inputSchema
-                }
-                for tool in tools_response.tools
-            ]
-            
-            logger.info(f"Discovered {len(self.available_tools)} tools:")
-            for tool in self.available_tools:
-                logger.info(f"  - {tool['name']}: {tool['description']}")
-                
-        except Exception as e:
-            logger.error(f"Failed to discover tools: {e}", exc_info=True)
-            self.available_tools = []
-    
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a tool and return results"""
-        try:
-            if not self.session:
-                raise RuntimeError("Session not initialized")
-            
-            logger.info(f"Calling tool: {tool_name} with args: {arguments}")
-            
-            # Call the tool
-            result = await self.session.call_tool(tool_name, arguments)
-            
-            # Parse the response
-            if result.content and len(result.content) > 0:
-                content = result.content[0]
-                if hasattr(content, 'text'):
-                    try:
-                        parsed_result = json.loads(content.text)
-                        logger.info(f"Tool {tool_name} executed successfully")
-                        return parsed_result
-                    except json.JSONDecodeError:
-                        return {"result": content.text}
-                else:
-                    return {"result": str(content)}
-            
-            return {"result": "No content returned"}
-            
-        except Exception as e:
-            logger.error(f"Error calling tool {tool_name}: {e}", exc_info=True)
-            return {"error": str(e), "tool": tool_name}
-    
-    def get_tools_for_model(self) -> List[Dict]:
-        """Get tools formatted for model API"""
-        tools = []
-        for tool in self.available_tools:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["inputSchema"]
-                }
-            })
-        return tools
-    
-    async def disconnect(self):
-        """Disconnect from MCP server"""
-        try:
-            if self.session:
-                await self.session.__aexit__(None, None, None)
-                self.session = None
-            
-            if self._stdio_context:
-                await self._stdio_context.__aexit__(None, None, None)
-                self._stdio_context = None
-            
-            self._connected = False
-            logger.info("Disconnected from MCP server")
-            
-        except Exception as e:
-            logger.error(f"Error during disconnect: {e}", exc_info=True)
-    
-    @property
-    def is_connected(self) -> bool:
-        return self._connected and self.session is not None
-
+    async def send_update(self, session_id: str, message: Dict[str, Any]):
+        """Send update to all connections for a session (placeholder)"""
+        if session_id in self.connections:
+            # In real implementation, send to actual WebSocket connections
+            logger.info(f"Broadcasting to {len(self.connections[session_id])} connections: {message}")
+        
 class ServerConnection:
     """Server connection manager"""
     
@@ -228,753 +137,743 @@ class ServerConnection:
             except Exception as e:
                 logger.error(f"Error during server cleanup: {e}")
 
-
 class ConversationManager:
+    """conversation manager with database persistence and tool support"""
     
-    def __init__(self, cache_client=None, db_client=None):
-        self.cache_client = cache_client
-        self.db_client = db_client
-        self.conversations = {}
-        logger.info("ConversationManager initialized")
-    
-    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
-        """Get or create a conversation session"""
-        if session_id not in self.conversations:
-            self.conversations[session_id] = {
-                "messages": [],
-                "created_at": asyncio.get_event_loop().time(),
-                "updated_at": asyncio.get_event_loop().time()
-            }
-            logger.info(f"Created new session: {session_id}")
+    def __init__(self, db_manager):
+        self.db = db_manager
+        self.memory_cache = {}
         
-        return self.conversations[session_id]
+    async def create_session(
+        self, 
+        user_id: str, 
+        title: str = None, 
+        model: str = "gpt-4", 
+        provider: str = "openai",
+        settings: Dict = None
+    ) -> str:
+        """Create new conversation session"""
+        session_id = str(uuid.uuid4())
+        session = Session(
+            id=session_id,
+            user_id=user_id,
+            title=title or "New Conversation",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            model=model,
+            provider=provider,
+            settings=settings or {}
+        )
+        
+        await self.db.save_session(session)
+        self.memory_cache[session_id] = session
+        logger.info(f"Created session {session_id} for user {user_id}")
+        return session_id
     
-    async def get_conversation_context(self, session_id: str) -> List[Dict[str, Any]]:
-        """Get conversation context for model """
-        if session_id not in self.conversations:
-            return []
-
-        return self.conversations[session_id]["messages"]
+    async def get_or_create_session(self, session_id: str, user_id: str) -> Session:
+        """Get existing session or create new one"""
+        # Try cache first
+        if session_id in self.memory_cache:
+            return self.memory_cache[session_id]
+        
+        # Try database
+        session = await self.db.get_session(session_id)
+        if session and session.user_id == user_id:
+            self.memory_cache[session_id] = session
+            return session
+        
+        # Create new session
+        new_session_id = await self.create_session(user_id)
+        return await self.get_or_create_session(new_session_id, user_id)
     
-    async def add_conversation_message(self, session_id: str, role: str, content: str):
+    async def save_message(self, session_id: str, message: Message):
+        """Save message to database and cache"""
+        await self.db.save_message(message)
+        
+        # Update memory cache and session metadata
+        if session_id in self.memory_cache:
+            session = self.memory_cache[session_id]
+            session.message_count += 1
+            session.updated_at = datetime.now(timezone.utc)
+            
+            # Cache messages for fast access
+            if "_messages" not in session:
+                session._messages = []
+            session._messages.append(message)
+    
+    async def get_conversation_context(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get conversation context for model (with tool support)"""
+        messages = await self.get_conversation_messages(session_id, limit)
+        
+        # Convert to OpenAI-compatible format with tool support
+        context = []
+        for msg in messages:
+            if hasattr(msg, 'to_openai_format'):
+                # If Message model has conversion method
+                context.append(msg.to_openai_format())
+            else:
+                # Basic conversion
+                message_data = {
+                    "role": msg.role,
+                    "content": msg.content
+                }
+                
+                # Add tool calls if present (from first class)
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    message_data["tool_calls"] = msg.tool_calls
+                
+                # Add tool call ID if present (from first class)
+                if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
+                    message_data["tool_call_id"] = msg.tool_call_id
+                
+                context.append(message_data)
+        
+        return context
+    
+    async def get_conversation_messages(self, session_id: str, limit: int = 50) -> List[Message]:
+        """Get conversation messages for LLM context"""
+        # Check cache first
+        if session_id in self.memory_cache and hasattr(self.memory_cache[session_id], '_messages'):
+            cached_messages = self.memory_cache[session_id]._messages
+            if len(cached_messages) >= limit:
+                return cached_messages[-limit:]
+        
+        # Get from database
+        messages = await self.db.get_messages(session_id, limit)
+        
+        # Update cache
+        if session_id in self.memory_cache:
+            self.memory_cache[session_id]._messages = messages
+        
+        return messages
+    
+    async def add_conversation_message(self, session_id: str, role: str, content: str, **kwargs) -> Message:
         """Add a message to conversation"""
-        if session_id not in self.conversations:
-            await self.get_or_create_session(session_id)
+        message = Message(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role=role,
+            content=content,
+            timestamp=datetime.now(timezone.utc),
+            **kwargs
+        )
         
-        self.conversations[session_id]["messages"].append({
-            "role": role,
-            "content": content
-        })
-        self.conversations[session_id]["updated_at"] = asyncio.get_event_loop().time()
+        await self.save_message(session_id, message)
+        logger.info(f"Added {role} message to session {session_id}")
+        return message
     
-    async def add_assistant_response(self, session_id: str, content: str):
-        """Add assistant response to conversation"""
-        await self.add_conversation_message(session_id, "assistant", content)
+    async def add_assistant_response(self, session_id: str, content: str, **kwargs) -> Message:
+        """Add assistant response to conversation (from first class)"""
+        return await self.add_conversation_message(session_id, "assistant", content, **kwargs)
     
     async def add_tool_call(self, session_id: str, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Add tool call to conversation and return tool call ID"""
-        tool_call_id = f"call_{int(asyncio.get_event_loop().time() * 1000)}"
+        """Add tool call to conversation and return tool call ID (from first class)"""
+        tool_call_id = f"call_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         
-        tool_message = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
+        tool_message = Message(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="assistant",
+            content="",
+            tool_calls=[{
                 "id": tool_call_id,
                 "type": "function",
                 "function": {
                     "name": tool_name,
                     "arguments": json.dumps(arguments, ensure_ascii=False)
                 }
-            }]
-        }
+            }],
+            timestamp=datetime.now(timezone.utc)
+        )
         
-        if session_id not in self.conversations:
-            await self.get_or_create_session(session_id)
-        
-        self.conversations[session_id]["messages"].append(tool_message)
+        await self.save_message(session_id, tool_message)
+        logger.info(f"Added tool call {tool_name} to session {session_id}")
         return tool_call_id
     
-    async def add_tool_result(self, session_id: str, tool_call_id: str, result: Any):
-        """Add tool result to conversation"""
-        tool_result_message = {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
-        }
+    async def add_tool_result(self, session_id: str, tool_call_id: str, result: Any, **kwargs) -> Message:
+        """Add tool result to conversation (from first class)"""
+        content = json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
         
-        if session_id in self.conversations:
-            self.conversations[session_id]["messages"].append(tool_result_message)
-
-class BaseProvider(ABC):
-    """Base class for all model providers with thinking support"""
-    
-    @abstractmethod
-    async def create_chat_completion(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict]] = None,
-        **kwargs
-    ) -> ModelResponse:
-        pass
-    
-    @abstractmethod
-    def get_tools_format(self, tools: List[Dict]) -> Any:
-        pass
-    
-    def _extract_thinking(self, response: Any) -> Optional[str]:
-        return None
-
-class OpenAIProvider(BaseProvider):
-    def __init__(
-        self, 
-        api_key: str, 
-        base_url: str = None, 
-        model: str = None,
-        extra_headers: Dict = None,
-        default_config: Dict[str, Any] = None
-    ):
-        from openai import OpenAI
-        
-        self.client = OpenAI(
-            api_key=api_key, 
-            base_url=base_url,
-            default_headers=extra_headers or {}
-        )
-        self.model = model
-        self.default_config = default_config or {}
-        logger.info(f"OpenAI provider initialized: {model} at {base_url or 'default'} with config {self.default_config}")
-    
-    async def create_chat_completion(self, messages, tools=None, **kwargs):
-        # Merge default config with kwargs, with kwargs taking precedence
-        config = {**self.default_config, **kwargs}
-        extra_body = config.pop('extra_body', {})
-        provider_tools = self.get_tools_format(tools) if tools else None
-        
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=provider_tools,
-                stream=False,
-                extra_body=extra_body,
-                **config
-            )
-        )
-        
-        return self._parse_response(response)
-    
-    def _parse_response(self, response) -> ModelResponse:
-        message = response.choices[0].message
-        content = message.content or ""
-        
-        thinking_content = self._extract_thinking(response)
-        
-        tool_calls = None
-        if message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                }
-                for tc in message.tool_calls
-            ]
-        
-        return ModelResponse(
+        tool_result_message = Message(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="tool",
             content=content,
-            thinking_content=thinking_content,
-            tool_calls=tool_calls,
-            raw_response=response
+            tool_call_id=tool_call_id,
+            timestamp=datetime.now(timezone.utc),
+            **kwargs
         )
+        
+        await self.save_message(session_id, tool_result_message)
+        logger.info(f"Added tool result for call {tool_call_id} to session {session_id}")
+        return tool_result_message
     
-    def _extract_thinking(self, response) -> Optional[str]:
-        message = response.choices[0].message
-        
-        if hasattr(message, 'reasoning_details') and message.reasoning_details:
-            return message.reasoning_details[0].get('text', '')
-        
-        if hasattr(message, 'content') and isinstance(message.content, list):
-            for block in message.content:
-                if hasattr(block, 'type') and block.type == 'thinking':
-                    return getattr(block, 'thinking', getattr(block, 'text', ''))
-        
-        return None
+    async def get_session_messages_with_tools(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get messages including tool calls and results in OpenAI format"""
+        return await self.get_conversation_context(session_id, limit)
     
-    def get_tools_format(self, tools):
-        return [{
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["inputSchema"]
-            }
-        } for tool in tools] if tools else None
+    async def cleanup_old_messages(self, session_id: str, keep_last: int = 100):
+        """Clean up old messages while keeping recent ones"""
+        await self.db.cleanup_old_messages(session_id, keep_last)
+        
+        # Clear cache to force refresh
+        if session_id in self.memory_cache and hasattr(self.memory_cache[session_id], '_messages'):
+            del self.memory_cache[session_id]._messages
+    
+    async def delete_session(self, session_id: str):
+        """Delete session and all related data"""
+        await self.db.delete_session(session_id)
+        if session_id in self.memory_cache:
+            del self.memory_cache[session_id]
+    
+    async def get_user_sessions(self, user_id: str, limit: int = 20) -> List[Session]:
+        """Get all sessions for a user"""
+        return await self.db.get_user_sessions(user_id, limit)
+    
+    async def update_session_title(self, session_id: str, title: str):
+        """Update session title"""
+        await self.db.update_session_title(session_id, title)
+        if session_id in self.memory_cache:
+            self.memory_cache[session_id].title = title
+            self.memory_cache[session_id].updated_at = datetime.now(timezone.utc)
 
-class AnthropicProvider(BaseProvider):
-    def __init__(
-        self, 
-        api_key: str, 
-        model: str = None,
-        default_config: Dict[str, Any] = None
-    ):        
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
-        self.default_config = default_config or {}
-        logger.info(f"Anthropic provider initialized: {model} with config {self.default_config}")
+class MCPClient:
+    """
+    MCP Client with multi-server support, health checks, and proper resource management.
+    Combines the best features from both single-server and multi-server implementations.
+    """
     
-    async def create_chat_completion(self, messages, tools=None, **kwargs):
-        config = {**self.default_config, **kwargs}
-        anthropic_messages, system_message = self._convert_messages(messages)
-        provider_tools = self.get_tools_format(tools) if tools else None
+    def __init__(self):
+        self.sessions: Dict[str, Any] = {}  # Multiple MCP server sessions
+        self.available_tools: Dict[str, List[Dict]] = {}  # Tools per server
+        self.server_configs: Dict[str, Dict] = {}  # Server configurations
+        self.health_status: Dict[str, bool] = {}
+        self._stdio_contexts: Dict[str, Any] = {}  # Store stdio contexts for proper cleanup
+        self._connected_servers = set()
         
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.client.messages.create(
-                model=self.model,
-                system=system_message,
-                messages=anthropic_messages,
-                tools=provider_tools,
-                **config
-            )
-        )
-        
-        return self._parse_response(response)
-    
-    def _parse_response(self, response) -> ModelResponse:
-        thinking_content = None
-        text_content = ""
-        
-        for block in response.content:
-            if block.type == "thinking":
-                thinking_content = block.thinking
-            elif block.type == "text":
-                text_content += block.text
-        
-        return ModelResponse(
-            content=text_content,
-            thinking_content=thinking_content,
-            raw_response=response
-        )
-    
-    def _convert_messages(self, messages):
-        system_message = None
-        anthropic_messages = []
-        
-        for msg in messages:
-            if msg["role"] == "system":
-                system_message = msg["content"]
-            else:
-                content = msg["content"]
-                if isinstance(content, list):
-                    anthropic_content = []
-                    for item in content:
-                        if isinstance(item, dict):
-                            if item.get("type") == "text":
-                                anthropic_content.append({
-                                    "type": "text",
-                                    "text": item.get("text", "")
-                                })
-                        else:
-                            anthropic_content.append({
-                                "type": "text", 
-                                "text": str(item)
-                            })
-                    content = anthropic_content
-                else:
-                    content = str(content)
-                
-                anthropic_messages.append({
-                    "role": msg["role"],
-                    "content": content
-                })
-        
-        return anthropic_messages, system_message
-    
-    def get_tools_format(self, tools):
-        return [{
-            "name": tool["name"],
-            "description": tool["description"],
-            "input_schema": tool["inputSchema"]
-        } for tool in tools]
+        logger.info("MCP Client initialized")
 
-class GeminiProvider(BaseProvider):
-    def __init__(
-        self, 
-        api_key: str, 
-        model: str = None,
-        default_config: Dict[str, Any] = None
-    ):
-        genai.configure(api_key=api_key)
-        self.model_name = model
-        self.default_config = default_config or {}
-        logger.info(f"Gemini provider initialized: {model}")
-    
-    async def create_chat_completion(self, messages, tools=None, **kwargs):
-        config = {**self.default_config, **kwargs}
-        
-        # Convert messages to Gemini format
-        gemini_messages = self._convert_messages(messages)
-        
-        # Configure model with tools if available
-        generation_config = genai.types.GenerationConfig(**config)
-        
-        model = genai.GenerativeModel(
-            model_name=self.model_name,
-            generation_config=generation_config,
-            tools=self.get_tools_format(tools) if tools else None
-        )
-        
-        # Start chat or generate content
-        if len(gemini_messages) > 1:
-            # For multi-turn conversations
-            chat = model.start_chat(history=gemini_messages[:-1])
-            response = await chat.send_message_async(gemini_messages[-1])
-        else:
-            # Single message
-            response = await model.generate_content_async(gemini_messages[0])
-        
-        return self._parse_response(response)
-    
-    def _convert_messages(self, messages: List[Dict]) -> List[Any]:
-        """Convert OpenAI-style messages to Gemini format"""
-        gemini_messages = []
-        
-        for msg in messages:
-            role = "user" if msg["role"] in ["user", "system"] else "model"
-            content = msg["content"]
+    async def add_mcp_server(self, name: str, config: Dict[str, Any]):
+        """Add MCP server configuration"""
+        self.server_configs[name] = config
+        logger.info(f"Added MCP server configuration: {name}")
+
+    async def connect_to_server(self, server_name: str) -> bool:
+        """Connect to a specific MCP server with proper resource management"""
+        if server_name in self._connected_servers:
+            logger.info(f"Already connected to {server_name}")
+            return True
             
-            # Handle tool calls and results
-            if msg["role"] == "assistant" and "tool_calls" in msg:
-                # Convert tool calls to Gemini function calls
-                for tool_call in msg["tool_calls"]:
-                    function_call = {
-                        "function_call": {
-                            "name": tool_call["function"]["name"],
-                            "args": json.loads(tool_call["function"]["arguments"])
-                        }
-                    }
-                    gemini_messages.append({
-                        "role": "model",
-                        "parts": [function_call]
-                    })
-            elif msg["role"] == "tool":
-                # Convert tool results
-                function_response = {
-                    "function_response": {
-                        "name": "tool_result",
-                        "response": {
-                            "content": msg["content"]
-                        }
-                    }
-                }
-                gemini_messages.append({
-                    "role": "user",
-                    "parts": [function_response]
-                })
-            else:
-                # Regular text message
-                gemini_messages.append({
-                    "role": role,
-                    "parts": [{"text": content}]
-                })
-        
-        return gemini_messages
-    
-    def _parse_response(self, response) -> ModelResponse:
-        """Parse Gemini response to our standard format"""
-        content = ""
-        thinking_content = None
-        tool_calls = None
-        
-        # Extract text content
-        if response.text:
-            content = response.text
-        
-        # Extract tool/function calls
-        if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'function_call'):
-                    if tool_calls is None:
-                        tool_calls = []
-                    tool_calls.append({
-                        "id": f"call_{len(tool_calls)}",
-                        "type": "function",
-                        "function": {
-                            "name": part.function_call.name,
-                            "arguments": json.dumps(part.function_call.args)
-                        }
-                    })
-        
-        return ModelResponse(
-            content=content,
-            thinking_content=thinking_content,
-            tool_calls=tool_calls,
-            raw_response=response
-        )
-    
-    def get_tools_format(self, tools: List[Dict]) -> List[Dict]:
-        """Convert tools to Gemini's function declaration format"""
-        if not tools:
-            return None
-            
-        return [{
-            "function_declarations": [{
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["inputSchema"]
-            } for tool in tools]
-        }]
-    
-    def get_provider_info(self) -> Dict[str, Any]:
-        return {
-            "provider": "gemini",
-            "model": self.model_name,
-            "supports_thinking": False,
-            "supports_tools": True
-        }
-
-class HuggingFaceProvider(BaseProvider):
-    def __init__(
-        self, 
-        api_key: str, 
-        model: str = None,
-        base_url: str = None,
-        default_config: Dict[str, Any] = None
-    ):
-        self.client = InferenceClient(
-            api_key=api_key,
-            base_url=base_url  
-        )
-        self.model = model
-        self.default_config = default_config or {}
-        logger.info(f"HuggingFace provider initialized: {model}")
-    
-    async def create_chat_completion(self, messages, tools=None, **kwargs):
-        """Create chat completion using HuggingFace Inference API"""
-        config = {**self.default_config, **kwargs}
-        
-        # Convert tools to HuggingFace format if available
-        formatted_tools = self.get_tools_format(tools) if tools else None
+        config = self.server_configs.get(server_name)
+        if not config:
+            logger.error(f"Server {server_name} not configured")
+            return False
         
         try:
-            # HuggingFace InferenceClient is synchronous, so we run in executor
-            completion = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=formatted_tools,
-                    **config
-                )
+            server_params = StdioServerParameters(
+                command=config.get("command", "python"),
+                args=config.get("args", []),
+                env=config.get("env", os.environ.copy())
             )
             
-            return self._parse_response(completion)
+            # Create and store stdio context for proper cleanup
+            stdio_context = stdio_client(server_params)
+            read_stream, write_stream = await stdio_context.__aenter__()
+            self._stdio_contexts[server_name] = stdio_context
             
-        except Exception as e:
-            logger.error(f"HuggingFace API call failed: {e}")
-            raise
-    
-    def _parse_response(self, completion) -> ModelResponse:
-        """Parse HuggingFace response to our standard format"""
-        message = completion.choices[0].message
-        content = message.content if hasattr(message, 'content') else ""
-        
-        # Extract tool calls if present
-        tool_calls = None
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            tool_calls = []
-            for tool_call in message.tool_calls:
-                tool_calls.append({
-                    "id": getattr(tool_call, 'id', f"call_{len(tool_calls)}"),
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
-                    }
-                })
-
-        thinking_content = self._extract_thinking(completion)
-        
-        return ModelResponse(
-            content=content,
-            thinking_content=thinking_content,
-            tool_calls=tool_calls,
-            raw_response=completion
-        )
-    
-    def _extract_thinking(self, completion) -> Optional[str]:
-        """Extract thinking/reasoning content from HuggingFace response"""
-        message = completion.choices[0].message
-        
-        # Check if there's reasoning content in the response
-        if hasattr(message, 'reasoning_content'):
-            return message.reasoning_content
-        
-        # For models that include thinking in the content
-        content = message.content if hasattr(message, 'content') else ""
-        if " thought:" in content.lower() or " reasoning:" in content.lower():
-            # Simple heuristic - you might want more sophisticated parsing
-            lines = content.split('\n')
-            thinking_lines = [line for line in lines if any(word in line.lower() for word in ['thought:', 'reasoning:', 'thinking:'])]
-            if thinking_lines:
-                return '\n'.join(thinking_lines)
-        
-        return None
-    
-    def get_tools_format(self, tools: List[Dict]) -> List[Dict]:
-        """Convert tools to HuggingFace's tool format"""
-        if not tools:
-            return None
+            # Create session
+            session = ClientSession(read_stream, write_stream)
+            await session.__aenter__()
+            await session.initialize()
             
-        return [{
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["inputSchema"]
-            }
-        } for tool in tools]
-    
-    def get_provider_info(self) -> Dict[str, Any]:
-        return {
-            "provider": "huggingface",
-            "model": self.model,
-            "supports_thinking": True,  
-            "supports_tools": True
-        }
-        
-class ProviderFactory:
-    @staticmethod
-    def create_provider(provider_config: Dict[str, Any]) -> BaseProvider:
-        provider_type = provider_config["type"].lower()
-        api_key = provider_config.get("api_key") or os.getenv(f"{provider_type.upper()}_API_KEY")
-        
-        if not api_key:
-            raise ValueError(f"API key required for {provider_type}")
-        
-        model = provider_config.get("model")
-        base_url = provider_config.get("base_url")
-        extra_headers = provider_config.get("extra_headers", {})
-        default_config = provider_config.get("default_config", {})
-        
-        if provider_type == "openai":
-            return OpenAIProvider(
-                api_key=api_key, 
-                base_url=base_url, 
-                model=model, 
-                extra_headers=extra_headers,
-                default_config=default_config
-            )
-        elif provider_type == "anthropic":
-            return AnthropicProvider(
-                api_key=api_key, 
-                model=model,
-                default_config=default_config
-            )
-        elif provider_type == "gemini":
-            return GeminiProvider(
-                api_key=api_key,
-                model=model,
-                default_config=default_config
-            )
-        elif provider_type == "huggingface":
-            return HuggingFaceProvider(
-                api_key=api_key,
-                model=model,
-                base_url=base_url,
-                default_config=default_config
-            )
-        else:
-            raise ValueError(f"Unsupported provider type: {provider_type}")
-    
-    @staticmethod
-    def from_environment() -> BaseProvider:
-        provider_type = os.getenv("MODEL_PROVIDER", "openai").lower()
-        api_key_env = f"{provider_type.upper()}_API_KEY"
-        api_key = os.getenv(api_key_env)
-        
-        if not api_key:
-            raise ValueError(f"Environment variable {api_key_env} not set")
-        
-        config = {
-            "type": provider_type,
-            "api_key": api_key,
-            "model": os.getenv(f"{provider_type.upper()}_MODEL"),
-            "base_url": os.getenv(f"{provider_type.upper()}_BASE_URL"),
-            "default_config": {
-                "max_tokens": int(os.getenv("MODEL_MAX_TOKENS", "4096")),
-                "temperature": float(os.getenv("MODEL_TEMPERATURE", "0.7")),
-                "top_p": float(os.getenv("MODEL_TOP_P", "0.9")),
-            }
-        }
-        
-        return ProviderFactory.create_provider(config)
-
-
-class MCPClientSystem:
-    """MCP client system"""
-    
-    def __init__(
-        self, 
-        provider_config: Dict[str, Any],
-        server_script_path: str = "mcp_server.py", 
-        cache_client=None, 
-        db_client=None
-    ):
-        self.provider = ProviderFactory.create_provider(provider_config)
-        self.provider_config = provider_config
-        self.mcp_client = MCPClient()
-        self.server_connection = ServerConnection(server_script_path)
-        self.conversation_manager = ConversationManager(
-            cache_client=cache_client,
-            db_client=db_client
-        )
-        
-        logger.info(f"MCP Client System initialized with {provider_config['type']}")
-    
-    async def connect(self) -> bool:
-        """Connect all system components"""
-        try:
-            # Validate server connection
-            if not await self.server_connection.validate_server():
-                return False
+            # Store session and discover tools
+            self.sessions[server_name] = session
+            await self._discover_tools(server_name)
             
-            # Connect to MCP server
-            server_params = self.server_connection.get_server_params()
-            if not await self.mcp_client.connect(server_params):
-                return False
+            self._connected_servers.add(server_name)
+            self.health_status[server_name] = True
             
-            logger.info("MCP Client System connected successfully")
+            logger.info(f"Connected to MCP server: {server_name}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to connect MCP Client System: {e}", exc_info=True)
-            await self.disconnect()
+            logger.error(f"Failed to connect to {server_name}: {e}")
+            await self._cleanup_failed_connection(server_name)
+            self.health_status[server_name] = False
             return False
-    
-    async def disconnect(self):
-        """Disconnect all system components"""
+
+    async def _discover_tools(self, server_name: str):
+        """Discover tools from MCP server"""
         try:
-            # Disconnect MCP client
-            await self.mcp_client.disconnect()
-            logger.info("MCP Client System disconnected")
+            session = self.sessions[server_name]
+            tools_response = await session.list_tools()
+            
+            self.available_tools[server_name] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.inputSchema,
+                    "server": server_name
+                }
+                for tool in tools_response.tools
+            ]
+            
+            logger.info(f"Discovered {len(self.available_tools[server_name])} tools from {server_name}")
             
         except Exception as e:
-            logger.error(f"Error during disconnect: {e}", exc_info=True)
-    
-    async def _call_model(self, messages: List[Dict], tools: Optional[List] = None) -> ModelResponse:
-        """Call the model and return structured response with thinking"""
-        try:
-            return await self.provider.create_chat_completion(
-                messages=messages,
-                tools=tools
-            )
-        except Exception as e:
-            logger.error(f"Model call failed: {e}")
-            raise
-    
-    async def __aenter__(self):
-        """Async context manager entry"""
-        await self.connect()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
-        await self.disconnect()
+            logger.error(f"Failed to discover tools from {server_name}: {e}")
+            self.available_tools[server_name] = []
 
+    async def _cleanup_failed_connection(self, server_name: str):
+        """Clean up resources from failed connection"""
+        if server_name in self._stdio_contexts:
+            try:
+                await self._stdio_contexts[server_name].__aexit__(None, None, None)
+                del self._stdio_contexts[server_name]
+            except Exception as e:
+                logger.error(f"Error cleaning up {server_name}: {e}")
+
+    async def health_check(self, server_name: str) -> Dict[str, Any]:
+        """Perform health check on MCP server"""
+        if server_name not in self.sessions:
+            return {"status": "disconnected", "server": server_name}
+        
+        try:
+            # Simple ping by listing tools
+            session = self.sessions[server_name]
+            await session.list_tools()
+            self.health_status[server_name] = True
+            return {
+                "status": "healthy",
+                "server": server_name,
+                "tools_count": len(self.available_tools.get(server_name, []))
+            }
+        except Exception as e:
+            self.health_status[server_name] = False
+            return {
+                "status": "unhealthy", 
+                "server": server_name,
+                "error": str(e)
+            }
+
+    async def health_check_all(self) -> Dict[str, Dict[str, Any]]:
+        """Perform health check on all connected servers"""
+        results = {}
+        for server_name in list(self.sessions.keys()):
+            results[server_name] = await self.health_check(server_name)
+        return results
+
+    def get_all_tools(self) -> List[Dict]:
+        """Get all available tools from all connected servers"""
+        all_tools = []
+        for server_name, tools in self.available_tools.items():
+            for tool in tools:
+                tool_copy = tool.copy()
+                tool_copy["server"] = server_name
+                all_tools.append(tool_copy)
+        return all_tools
+
+    def get_tools_for_server(self, server_name: str) -> List[Dict]:
+        """Get tools for a specific server"""
+        return self.available_tools.get(server_name, [])
+
+    def get_tools_for_model(self, server_name: Optional[str] = None) -> List[Dict]:
+        """Get tools formatted for model API"""
+        tools = []
+        
+        if server_name:
+            # Get tools from specific server
+            server_tools = self.available_tools.get(server_name, [])
+            for tool in server_tools:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool["description"],
+                        "parameters": tool["inputSchema"]
+                    }
+                })
+        else:
+            # Get all tools from all servers
+            for server_tools in self.available_tools.values():
+                for tool in server_tools:
+                    tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool["description"],
+                            "parameters": tool["inputSchema"]
+                        }
+                    })
+        
+        return tools
+
+    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Call tool on specific server"""
+        if server_name not in self.sessions:
+            raise RuntimeError(f"Not connected to server {server_name}")
+        
+        session = self.sessions[server_name]
+        try:
+            logger.info(f"Calling tool {tool_name} on server {server_name} with args: {arguments}")
+            
+            result = await session.call_tool(tool_name, arguments)
+            
+            if result.content and len(result.content) > 0:
+                content = result.content[0]
+                if hasattr(content, 'text'):
+                    try:
+                        parsed_result = json.loads(content.text)
+                        logger.info(f"Tool {tool_name} on {server_name} executed successfully")
+                        return parsed_result
+                    except json.JSONDecodeError:
+                        return {"result": content.text}
+                else:
+                    return {"result": str(content)}
+            return {"result": "No content returned"}
+            
+        except Exception as e:
+            logger.error(f"Tool call failed on {server_name}: {e}")
+            return {"error": str(e), "tool": tool_name, "server": server_name}
+
+    async def call_tool_with_fallback(self, tool_name: str, arguments: Dict[str, Any], preferred_server: Optional[str] = None) -> Dict[str, Any]:
+        """Call tool with server fallback logic"""
+        servers_to_try = []
+        
+        if preferred_server and preferred_server in self.sessions:
+            servers_to_try.append(preferred_server)
+        
+        # Add other servers that have this tool
+        for server_name, tools in self.available_tools.items():
+            if server_name != preferred_server and any(tool["name"] == tool_name for tool in tools):
+                servers_to_try.append(server_name)
+        
+        # Try servers in order
+        for server_name in servers_to_try:
+            try:
+                result = await self.call_tool(server_name, tool_name, arguments)
+                if "error" not in result:
+                    return result
+            except Exception as e:
+                logger.warning(f"Tool call failed on {server_name}, trying next server: {e}")
+                continue
+        
+        return {"error": f"Tool {tool_name} not available on any connected server"}
+
+    async def disconnect_server(self, server_name: str):
+        """Disconnect from specific server"""
+        try:
+            if server_name in self.sessions:
+                await self.sessions[server_name].__aexit__(None, None, None)
+                del self.sessions[server_name]
+            
+            if server_name in self._stdio_contexts:
+                await self._stdio_contexts[server_name].__aexit__(None, None, None)
+                del self._stdio_contexts[server_name]
+                
+            if server_name in self.health_status:
+                del self.health_status[server_name]
+            
+            if server_name in self._connected_servers:
+                self._connected_servers.remove(server_name)
+                
+            logger.info(f"Disconnected from MCP server: {server_name}")
+            
+        except Exception as e:
+            logger.error(f"Error disconnecting from {server_name}: {e}")
+
+    async def disconnect_all(self):
+        """Disconnect from all MCP servers with proper resource cleanup"""
+        for server_name in list(self.sessions.keys()):
+            await self.disconnect_server(server_name)
+        
+        logger.info("Disconnected from all MCP servers")
+
+    def is_connected(self, server_name: str) -> bool:
+        """Check if connected to specific server"""
+        return server_name in self.sessions and server_name in self._connected_servers
+
+    def get_connected_servers(self) -> List[str]:
+        """Get list of all connected server names"""
+        return list(self._connected_servers)
+
+    def get_server_tool_names(self, server_name: str) -> List[str]:
+        """Get list of tool names for a specific server"""
+        tools = self.available_tools.get(server_name, [])
+        return [tool["name"] for tool in tools]
+
+    def has_tool(self, tool_name: str, server_name: Optional[str] = None) -> bool:
+        """Check if tool is available"""
+        if server_name:
+            return any(tool["name"] == tool_name for tool in self.available_tools.get(server_name, []))
+        else:
+            return any(
+                any(tool["name"] == tool_name for tool in tools)
+                for tools in self.available_tools.values()
+            )
+
+    async def reconnect_server(self, server_name: str) -> bool:
+        """Reconnect to a server"""
+        await self.disconnect_server(server_name)
+        return await self.connect_to_server(server_name)
+
+    @property
+    def total_tools_count(self) -> int:
+        """Get total number of available tools across all servers"""
+        return sum(len(tools) for tools in self.available_tools.values())
+
+    @property
+    def connected_servers_count(self) -> int:
+        """Get number of connected servers"""
+        return len(self._connected_servers)
+
+class MCPClientSystem:
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.db = DatabaseManager(
+            config.get("mongodb_url"),
+            config.get("db_name", "agent_ui")
+        )
+        self.mcp_client = MCPClient()
+        self.conversation_manager = None 
+        self.websocket_manager = WebSocketManager()
+        self.providers = {}
+        
+    async def initialize(self):
+        """Initialize the client system"""
+        # Connect to database
+        await self.db.connect()
+        self.conversation_manager = ConversationManager(self.db)
+        
+        # Initialize MCP servers
+        await self._setup_mcp_servers()
+        
+        # Initialize providers
+        await self._setup_providers()
+        
+        logger.info("Agent Client initialized")
+    
+    async def _setup_mcp_servers(self):
+        """Setup MCP servers from configuration"""
+        mcp_servers = self.config.get("mcp_servers", [])
+        
+        for server_config in mcp_servers:
+            await self.mcp_client.add_mcp_server(
+                server_config["name"], 
+                server_config
+            )
+            
+            # Auto-connect to servers if configured
+            if server_config.get("auto_connect", True):
+                await self.mcp_client.connect_to_server(server_config["name"])
+    
+    async def _setup_providers(self):
+        """Initialize LLM providers"""
+        provider_configs = self.config.get("providers", {})
+        
+        for name, config in provider_configs.items():
+            try:
+                self.providers[name] = ProviderFactory.create_provider(config)
+                logger.info(f"Initialized provider: {name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize provider {name}: {e}")
+    
+    async def create_session(self, user_id: str, **kwargs) -> str:
+        """Create new conversation session"""
+        return await self.conversation_manager.create_session(user_id, **kwargs)
+    
     async def process_message(
         self,
         session_id: str,
+        user_id: str,
         message: str,
-        use_streaming: bool = False
-    ) -> Dict[str, Any]:
-        """Process a user message with thinking support"""
-        try:
-            await self.conversation_manager.get_or_create_session(session_id)
-
-            # Add user message
-            await self.conversation_manager.add_conversation_message(
-                session_id, "user", message
+        use_streaming: bool = False,
+    ) -> Union[ModelResponse, AsyncGenerator[ModelResponse, None]]:
+        
+        # Ensure session exists
+        session = await self.conversation_manager.get_or_create_session(session_id, user_id)
+        
+        # Save user message
+        user_message = Message(
+            id=str(uuid.uuid4()),
+            role="user",
+            content=message,
+            timestamp=datetime.now(timezone.utc),
+            session_id=session_id
+        )
+        await self.conversation_manager.save_message(session_id, user_message)
+        
+        # Get conversation context
+        messages = await self.conversation_manager.get_conversation_messages(session_id)
+        
+        # Check for available tools
+        tools = self.mcp_client.get_all_tools()
+        has_tools = len(tools) > 0
+        
+        # Get provider
+        provider = self.providers.get(session.provider)
+        if not provider:
+            raise ValueError(f"Provider {session.provider} not configured")
+        
+        # Send WebSocket update for message processing start
+        await self.websocket_manager.send_update(session_id, {
+            "type": "message_processing",
+            "status": "started",
+        })
+        
+        if use_streaming and hasattr(provider, 'create_chat_completion'):
+            # Streaming response
+            async for response in provider.create_chat_completion(
+                messages=[{"role": msg.role, "content": msg.content} for msg in messages],
+                tools=tools,
+                stream=True
+            ):
+                # Send streaming update
+                await self.websocket_manager.send_update(session_id, {
+                    "type": "stream_chunk",
+                    "content": response.content
+                })
+                yield response
+        else:
+            # Single response processing
+            response = await provider.create_chat_completion(
+                messages=[{"role": msg.role, "content": msg.content} for msg in messages],
+                tools=tools
             )
-
-            # Prepare tools
-            tools = self.mcp_client.get_tools_for_model()
-
-            # Get conversation context
-            context = await self.conversation_manager.get_conversation_context(session_id)
-
-            # FIRST MODEL CALL
-            logger.info(f"First model call with {len(context)} messages")
-            response = await self._call_model(context, tools if tools else None)
-
-            # Store thinking content if available
-            thinking_content = response.thinking_content
             
-            # Add assistant response to conversation
-            assistant_message = {"role": "assistant", "content": response.content or ""}
+            # Handle tool calls
             if response.tool_calls:
-                assistant_message["tool_calls"] = response.tool_calls
-            
-            if session_id in self.conversation_manager.conversations:
-                self.conversation_manager.conversations[session_id]["messages"].append(assistant_message)
-
-            # Execute tool calls if any
-            final_content = response.content
-            tool_results = []
-            
-            if response.tool_calls:
-                logger.info(f"Executing {len(response.tool_calls)} tool calls")
+                await self._handle_tool_calls(session_id, response.tool_calls, tools)
                 
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call["function"]["name"]
-                    arguments = json.loads(tool_call["function"]["arguments"])
-
-                    # Execute tool
-                    result = await self.mcp_client.call_tool(tool_name, arguments)
-
-                    # Add tool result to conversation
-                    tool_result_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
-                    }
-                    
-                    if session_id in self.conversation_manager.conversations:
-                        self.conversation_manager.conversations[session_id]["messages"].append(tool_result_message)
-
-                    tool_results.append({
-                        "tool_name": tool_name,
-                        "result": result
-                    })
-
-                # SECOND MODEL CALL after tool execution
-                updated_context = await self.conversation_manager.get_conversation_context(session_id)
-                logger.info(f"Second model call with {len(updated_context)} messages")
-
-                final_response = await self._call_model(updated_context, tools=tools)
-                final_content = final_response.content
-
-                # Add final response to conversation
-                if final_content:
-                    await self.conversation_manager.add_assistant_response(session_id, final_content)
-
-            return {
-                "session_id": session_id,
-                "content": final_content,
-                "thinking_content": thinking_content,
-                "tool_calls_executed": len(response.tool_calls) if response.tool_calls else 0,
-                "tool_results": tool_results,
-                "has_final_response": bool(final_content and final_content.strip()),
-                "provider_type": self.provider_config["type"]
-            }
-
-        except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
-            return {
-                "session_id": session_id,
-                "error": str(e)
-            }
+                # Get updated context after tool execution
+                updated_messages = await self.conversation_manager.get_conversation_messages(session_id)
+                final_response = await provider.create_chat_completion(
+                    messages=[{"role": msg.role, "content": msg.content} for msg in updated_messages],
+                    tools=tools
+                )
+                response = final_response
+            
+            # Save assistant response
+            assistant_message = Message(
+                id=str(uuid.uuid4()),
+                role="assistant", 
+                content=response.content,
+                timestamp=datetime.now(timezone.utc),
+                session_id=session_id,
+                tool_calls=response.tool_calls,
+                thinking_content=response.thinking_content
+            )
+            await self.conversation_manager.save_message(session_id, assistant_message)
+            
+            # Send completion update
+            await self.websocket_manager.send_update(session_id, {
+                "type": "message_complete",
+                "response": asdict(response)
+            })
+            
+            yield response
+    
+    async def _handle_tool_calls(self, session_id: str, tool_calls: List[Dict], tools: List[Dict]):
+        """Handle tool calls with progress updates"""
+        for tool_call in tool_calls:
+            tool_name = tool_call["function"]["name"]
+            arguments = json.loads(tool_call["function"]["arguments"])
+            
+            # Find which server has this tool
+            tool_info = next((t for t in tools if t["name"] == tool_name), None)
+            if not tool_info:
+                continue
+            
+            server_name = tool_info["server"]
+            
+            # Send tool call start
+            await self.websocket_manager.send_update(session_id, {
+                "type": "tool_call_start",
+                "tool_name": tool_name,
+                "arguments": arguments
+            })
+            
+            try:
+                # Execute tool
+                result = await self.mcp_client.call_tool(server_name, tool_name, arguments)
+                
+                # Send tool result
+                await self.websocket_manager.send_update(session_id, {
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": result
+                })
+                
+                # Save tool result message
+                tool_result_message = Message(
+                    id=str(uuid.uuid4()),
+                    role="tool",
+                    content=json.dumps(result) if isinstance(result, (dict, list)) else str(result),
+                    timestamp=datetime.now(timezone.utc),
+                    session_id=session_id,
+                    metadata={"tool_call_id": tool_call["id"], "server": server_name}
+                )
+                await self.conversation_manager.save_message(session_id, tool_result_message)
+                
+            except Exception as e:
+                # Send error
+                await self.websocket_manager.send_update(session_id, {
+                    "type": "tool_error",
+                    "tool_name": tool_name,
+                    "error": str(e)
+                })
+    
+    async def get_session_history(self, session_id: str, user_id: str) -> Dict[str, Any]:
+        """Get session history and metadata"""
+        session = await self.conversation_manager.get_or_create_session(session_id, user_id)
+        messages = await self.conversation_manager.get_conversation_messages(session_id)
+        
+        return {
+            "session": asdict(session),
+            "messages": [asdict(msg) for msg in messages],
+            "total_messages": len(messages)
+        }
+    
+    async def get_user_sessions(self, user_id: str) -> List[Session]:
+        """Get all sessions for a user"""
+        return await self.db.get_user_sessions(user_id)
+    
+    async def get_user_settings(self, user_id: str) -> UserSettings:
+        """Get user settings"""
+        settings = await self.db.get_user_settings(user_id)
+        if not settings:
+            settings = UserSettings(user_id=user_id)
+            await self.db.save_user_settings(settings)
+        return settings
+    
+    async def save_user_settings(self, settings: UserSettings):
+        """Save user settings"""
+        await self.db.save_user_settings(settings)
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """System health check"""
+        health = {
+            "database": False,
+            "mcp_servers": {},
+            "providers": list(self.providers.keys()),
+            "mcp_connected": len(self.mcp_client._connected_servers)
+        }
+        
+        # Check database
+        try:
+            await self.db.db.admin.command('ping')
+            health["database"] = True
+        except:
+            pass
+        
+        # Check MCP servers
+        for server_name in self.mcp_client.server_configs:
+            health["mcp_servers"][server_name] = await self.mcp_client.health_check(server_name)
+        
+        return health
+    
+    async def cleanup(self):
+        """Cleanup resources"""
+        await self.mcp_client.disconnect_all()
+        await self.db.disconnect()
