@@ -1,9 +1,4 @@
 # utils/performance.py
-"""
-Performance monitoring and metrics collection
-Inspired by enterprise-grade monitoring patterns
-"""
-
 import time
 import functools
 import asyncio

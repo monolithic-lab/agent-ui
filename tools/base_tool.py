@@ -10,9 +10,6 @@ from core.exceptions import ToolExecutionError
 
 logger = logging.getLogger(__name__)
 
-# Import registry functionality from parent module
-# Note: These imports work because __init__.py defines TOOL_REGISTRY first
-
 @dataclass
 class ToolSchema:
     """Tool schema for function calling"""

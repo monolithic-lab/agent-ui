@@ -175,10 +175,7 @@ def detect_loop(
 
 # Advanced loop detection service
 class LoopDetectionService:
-    """
-    Enterprise-grade loop detection service
-    Implements multiple detection strategies with configurable thresholds
-    """
+    """Implements multiple detection strategies with configurable thresholds"""
     
     def __init__(self, config: LoopDetectionConfig = None):
         self.config = config or LoopDetectionConfig()

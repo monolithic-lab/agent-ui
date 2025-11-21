@@ -72,11 +72,7 @@ class MCPConnection:
 
 
 class MCPManager:
-    """
-    Enterprise-grade MCP Manager Singleton
-    Provides centralized management of all MCP servers
-    """
-    
+    """Provides centralized management of all MCP servers"""
     _instance = None
     _initialized = False
     

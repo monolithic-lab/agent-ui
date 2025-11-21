@@ -43,6 +43,11 @@ from .performance import (
 )
 
 from .parallel import parallel_execution
+from .metrics import (
+    MetricsCollector,
+    HealthChecker,
+    initialize_monitoring
+)
 
 __all__ = [
     # Safety and Loop Detection
@@ -77,5 +82,9 @@ __all__ = [
     'track_memory_usage',
     'track_cpu_usage',
     'AsyncLimiter',
-    'parallel_execution'
+    'parallel_execution',
+
+    'MetricsCollector',
+    'HealthChecker', 
+    'initialize_monitoring'
 ]

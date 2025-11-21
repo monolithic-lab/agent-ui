@@ -96,11 +96,7 @@ class CacheEntry:
 
 
 class ResponseCache:
-    """
-    Enterprise-grade response caching system
-    Provides intelligent caching with multiple strategies
-    """
-    
+    """Provides intelligent caching with multiple strategies"""
     def __init__(self, config: CacheConfig = None):
         self.config = config or CacheConfig()
         
